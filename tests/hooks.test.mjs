@@ -397,7 +397,7 @@ describe("hooks", () => {
       assert.equal(snapshot.sessionId, null);
       assert.equal(snapshot.hasLastAssistantMessage, true);
       const claudeArgs = JSON.parse(fs.readFileSync(argsFile, "utf8"));
-      assert.equal(claudeArgs.includes("--model"), false);
+      assert.equal(claudeArgs[claudeArgs.indexOf("--model") + 1], "claude-fable-5-1");
       assert.equal(claudeArgs.includes("--effort"), false);
       const permissionModeIndex = claudeArgs.indexOf("--permission-mode");
       assert.ok(permissionModeIndex >= 0);

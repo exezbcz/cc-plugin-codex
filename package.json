@@ -1,6 +1,6 @@
 {
   "name": "cc-companion-local",
-  "version": "1.5.1-local.1+codex.20260910180757",
+  "version": "1.5.1-local.1+codex.20260910185325",
   "description": "CC Companion: a maintained Codex plugin for delegated Claude Code tasks",
   "type": "module",
   "author": {

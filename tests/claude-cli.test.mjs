@@ -497,11 +497,11 @@ describe("resolveModel", () => {
 // ===========================================================================
 
 describe("resolveDefaultModel", () => {
-  it("returns 'opus' when model is null/undefined/empty", () => {
-    assert.equal(resolveDefaultModel(null), "opus");
-    assert.equal(resolveDefaultModel(undefined), "opus");
-    assert.equal(resolveDefaultModel(""), "opus");
-    assert.equal(resolveDefaultModel("   "), "opus");
+  it("returns 'claude-fable-5-1' when model is null/undefined/empty", () => {
+    assert.equal(resolveDefaultModel(null), "claude-fable-5-1");
+    assert.equal(resolveDefaultModel(undefined), "claude-fable-5-1");
+    assert.equal(resolveDefaultModel(""), "claude-fable-5-1");
+    assert.equal(resolveDefaultModel("   "), "claude-fable-5-1");
   });
 
   it("passes through an explicit model", () => {
@@ -511,8 +511,8 @@ describe("resolveDefaultModel", () => {
     assert.equal(resolveDefaultModel("claude-opus-4-7"), "claude-opus-4-7");
   });
 
-  it("exposes DEFAULT_MODEL constant as 'opus'", () => {
-    assert.equal(DEFAULT_MODEL, "opus");
+  it("exposes DEFAULT_MODEL constant as 'claude-fable-5-1'", () => {
+    assert.equal(DEFAULT_MODEL, "claude-fable-5-1");
   });
 });
 
@@ -530,11 +530,11 @@ describe("effort defaults", () => {
     }
   });
 
-  it("omits whitespace-only --model / --effort instead of pushing undefined", () => {
-    // Both resolvers return undefined for blank input; pushing that into argv
-    // throws ERR_INVALID_ARG_TYPE in spawn().
+  it("uses the pinned default for a blank model and omits blank effort", () => {
+    // Blank input must produce a valid default model and no undefined argv
+    // members, which would throw ERR_INVALID_ARG_TYPE in spawn().
     const args = buildArgs("p", { model: "   ", effort: "  " });
-    assert.equal(args.includes("--model"), false);
+    assert.equal(args[args.indexOf("--model") + 1], "claude-fable-5-1");
     assert.equal(args.includes("--effort"), false);
     assert.equal(
       args.every((value) => typeof value === "string"),

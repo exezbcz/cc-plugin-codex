@@ -25,3 +25,7 @@ Provider-backed verification through the installed plugin completed for review, 
 - A running delegated Claude subprocess was cancelled through the plugin. Its process group stopped, cancelled status and result persisted, and default status/result views honored the explicit parent owner. This verifies active-process cancellation; long-wait orchestration is separately covered by synthetic E2E tests.
 
 These calls used the existing Claude CLI login in explicit subscription mode. No live verification transcript, account details, session identifiers or machine-specific configuration is part of this repository.
+
+## Fable 5.1 default
+
+The plugin default is pinned to `claude-fable-5-1` across commands and direct review/stop-hook calls. A provider-backed structured review verified both the CLI initialization model and response model as `claude-fable-5-1`, identified a deliberate defect, and left the synthetic source unchanged. Explicit per-call model overrides remain supported; no effort level is forced.

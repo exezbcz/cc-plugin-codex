@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.1-local.1+codex.20260910185325
+
+- Pin the default to Claude Fable 5.1 (`claude-fable-5-1`) for review, rescue and the optional stop-review hook. Keep explicit per-call model overrides and Claude-owned effort defaults.
+
 ## v1.5.1-local.1+codex.20260910180757
 
 - Record provider-backed verification of review, implementation, session resume and restricted review tools through the installed plugin. Refresh the local cache build; agent execution behavior is unchanged.

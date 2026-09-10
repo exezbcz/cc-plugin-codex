@@ -80,7 +80,7 @@ $cc:result <job-id>
 $cc:cancel <job-id>
 ```
 
-Use `--model` and `--effort` for an explicit Claude model/effort choice. These flags select the delegated Claude runtime, not the forwarding Codex agent. Without an override the inherited plugin model default is `opus`; effort is left to Claude. Availability depends on the installed CLI and account.
+Use `--model` and `--effort` for an explicit Claude model/effort choice. These flags select the delegated Claude runtime, not the forwarding Codex agent. Without an override the plugin model default is pinned to Claude Fable 5.1 (`claude-fable-5-1`); effort is left to Claude. Availability depends on the installed CLI and account.
 
 Implementation/rescue uses `bypassPermissions` in the selected workspace. It can edit files and run commands. Reviews have a separate restricted tool set and deliberate read-only Git MCP access. Codex remains responsible for evaluating proposed work and coordinating concurrent edits.
 

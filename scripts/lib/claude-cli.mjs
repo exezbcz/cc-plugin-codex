@@ -673,7 +673,7 @@ export const EFFORT_ALIASES = {
 
 export const VALID_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
-export const DEFAULT_MODEL = "opus";
+export const DEFAULT_MODEL = "claude-fable-5-1";
 
 const FRIENDLY_ALIASES = new Set(["fable", "opus", "sonnet", "haiku"]);
 
@@ -738,13 +738,10 @@ export function buildArgs(prompt, options = {}) {
   if (options.noSessionPersistence) {
     args.push("--no-session-persistence");
   }
-  // Gate on the resolved value, not the raw input: both resolvers return
-  // undefined for whitespace-only strings, and pushing undefined into argv
-  // throws ERR_INVALID_ARG_TYPE in spawn().
-  const model = resolveModel(options.model);
-  if (model) {
-    args.push("--model", model);
-  }
+  // Apply the shared default here too so direct reviews and the stop hook use
+  // the same model as review/rescue commands. Explicit overrides still win.
+  const model = resolveDefaultModel(resolveModel(options.model));
+  args.push("--model", model);
   const effort = resolveEffort(options.effort);
   if (effort) {
     args.push("--effort", effort);
