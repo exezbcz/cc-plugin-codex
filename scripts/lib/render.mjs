@@ -226,7 +226,7 @@ export function renderSetupReport(report) {
   const lines = [
     "# Claude Code Setup",
     "",
-    `Status: ${report.ready ? "ready" : "needs attention"}`,
+    `Status: ${report.checkOnly ? "not verified (diagnostic only)" : report.ready ? "ready" : "needs attention"}`,
     "",
     "Checks:",
     `- node: ${report.node.detail}`,

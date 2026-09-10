@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mjs";
 import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
+import { readClaudeAuthStatus, resolveAuthMode, sanitizeClaudeDiagnostic } from "./claude-auth.mjs";
 
 const CLAUDE_PACKAGE_EXE_PARTS = [
   "node_modules",
@@ -148,25 +149,11 @@ export function getClaudeAvailability(cwd) {
   }
 }
 
-export function getClaudeAuthStatus(cwd) {
-  if (process.env.ANTHROPIC_API_KEY) {
-    return { available: true, loggedIn: true, detail: "API key configured" };
-  }
-  try {
-    const result = spawnSync(CLAUDE_BIN, ["auth", "status"], {
-      cwd,
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    if (result.status !== 0) throw new Error("not authenticated");
-    return { available: true, loggedIn: true, detail: "authenticated" };
-  } catch {
-    return {
-      available: true,
-      loggedIn: false,
-      detail: "not authenticated — run `claude auth login`",
-    };
-  }
+export function getClaudeAuthStatus(cwd, options = {}) {
+  return readClaudeAuthStatus(cwd, {
+    ...options,
+    bin: options.bin ?? resolveClaudeBin({ env: options.env ?? process.env }),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +168,9 @@ export class StreamParser {
       finalMessage: "",
       structuredOutput: null,
       receivedTerminalEvent: false,
+      terminalIsError: false,
+      terminalSubtype: null,
+      permissionDenialCount: 0,
       unknownEvents: [],
       parseErrors: [],
       unresolvedParseErrors: 0,
@@ -222,6 +212,10 @@ export class StreamParser {
           return this._handleSystemEvent(event);
         case "result":
           this.state.receivedTerminalEvent = true;
+          this.state.terminalIsError = event.is_error === true;
+          this.state.terminalSubtype = typeof event.subtype === "string" ? event.subtype : null;
+          this.state.permissionDenialCount = Array.isArray(event.permission_denials)
+            ? event.permission_denials.length : 0;
           if (event.result) {
             this.state.finalMessage = mergeTerminalResultText(
               this.state.finalMessage,
@@ -361,6 +355,9 @@ export function validateTurnCompletion(state, exitCode) {
   if (exitCode !== 0) {
     return { status: "failed", exitCode };
   }
+  if (state.terminalIsError || state.terminalSubtype?.startsWith("error_")) {
+    return { status: "failed", warning: "Claude reported a failed terminal result." };
+  }
   if (state.unresolvedParseErrors > 0) {
     return {
       status: "unknown",
@@ -373,16 +370,20 @@ export function validateTurnCompletion(state, exitCode) {
       warning: "No terminal result event received despite exit code 0",
     };
   }
+  if (state.terminalSubtype && state.terminalSubtype !== "success") {
+    return { status: "unknown", warning: "Claude returned an unrecognized terminal result subtype." };
+  }
   if (state.unknownEvents.length > 0) {
     // Log but don't fail — protocol drift detection
   }
-  return { status: "completed" };
+  return state.permissionDenialCount > 0
+    ? { status: "completed", warning: `${state.permissionDenialCount} tool request(s) were denied; review the answer for incomplete work.` }
+    : { status: "completed" };
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox Tool Sets — approximate Codex sandbox modes via allowedTools.
-// Codex enforces sandbox at OS level (seatbelt/landlock); Claude Code lacks
-// OS-level sandboxing, so we restrict the tool whitelist instead.
+// Tool availability and permission rules are separate. --tools removes built-in
+// capabilities; --allowedTools only pre-approves calls to tools still available.
 // ---------------------------------------------------------------------------
 
 export const SANDBOX_READ_ONLY_BASH_TOOLS = [
@@ -456,6 +457,31 @@ export const SANDBOX_REVIEW_TOOLS = [
   ...REVIEW_MCP_ALLOWED_TOOLS,
 ];
 
+export const REVIEW_BUILTIN_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"];
+
+/** Cannot be weakened by a caller's review options or inherited user settings. */
+export function reviewExecutionOptions(options = {}) {
+  const allowedTools = options.allowedTools ?? SANDBOX_REVIEW_TOOLS;
+  if (!Array.isArray(allowedTools) || allowedTools.some((tool) => !SANDBOX_REVIEW_TOOLS.includes(tool))) {
+    throw new Error("Review tools must be a subset of the read-only file/web and bundled Git MCP tools.");
+  }
+  return {
+    ...options,
+    noSessionPersistence: true,
+    permissionMode: "dontAsk",
+    tools: REVIEW_BUILTIN_TOOLS.filter((tool) => allowedTools.includes(tool)),
+    allowedTools,
+    settingSources: "",
+    settingsFile: JSON.stringify(SANDBOX_SETTINGS["read-only"]),
+    strictMcpConfig: true,
+    // An explicit empty MCP configuration prevents ambient servers when a
+    // direct caller did not supply the bundled review server.
+    mcpConfigFile: options.mcpConfigFile ?? '{"mcpServers":{}}',
+    disableSlashCommands: true,
+    noChrome: true,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Sandbox Settings — OS-level isolation via Claude Code's sandbox feature.
 // Written to a temp file and passed via --settings.
@@ -473,6 +499,9 @@ export const SANDBOX_REVIEW_TOOLS = [
  */
 export const SANDBOX_SETTINGS = {
   "read-only": {
+    disableAllHooks: true,
+    disableClaudeAiConnectors: true,
+    enabledPlugins: {},
     sandbox: {
       enabled: true,
       // No Bash in the review allowlist, but keep this flag conservative so that
@@ -693,7 +722,7 @@ export function resolveEffort(effort) {
 /** @visibleForTesting */
 export function buildArgs(prompt, options = {}) {
   const args = ["-p"];
-  // No --bare: it breaks OAuth auth. Isolation is achieved via --allowedTools.
+  // No --bare: it breaks OAuth auth. --tools controls builtin availability.
 
   if (options.outputFormat === "stream-json") {
     args.push(
@@ -731,6 +760,10 @@ export function buildArgs(prompt, options = {}) {
       args.push("--allowedTools", tool);
     }
   }
+  if (options.tools) args.push("--tools", options.tools.join(","));
+  if (options.settingSources != null) args.push("--setting-sources", options.settingSources);
+  if (options.disableSlashCommands) args.push("--disable-slash-commands");
+  if (options.noChrome) args.push("--no-chrome");
   if (options.maxTurns) {
     args.push("--max-turns", String(options.maxTurns));
   }
@@ -761,14 +794,23 @@ export function buildArgs(prompt, options = {}) {
  * Returns { status, sessionId, finalMessage, toolUses, touchedFiles, stderr, pid, pidIdentity }
  */
 export async function runClaudeTurn(cwd, prompt, options = {}) {
+  // Capture once: the preflight must inspect exactly the environment used by
+  // the model subprocess. Never change HOME, OAuth tokens or Claude config.
+  const env = { ...(options.env ?? process.env) };
+  const bin = resolveClaudeBin({ env });
+  if (resolveAuthMode(env) === "subscription") {
+    const auth = getClaudeAuthStatus(cwd, { ...options, env, bin });
+    if (!auth.ready) throw new Error(`${auth.detail}${auth.conflicts.length ? ` (${auth.conflicts.join("; ")})` : ""}`);
+  }
   const args = buildArgs(prompt, {
     outputFormat: "stream-json",
     ...options,
   });
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(CLAUDE_BIN, args, {
+    const proc = spawn(bin, args, {
       cwd,
+      env,
       detached: true, // new process group for safe cancellation
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -846,7 +888,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         structuredOutput: parser.state.structuredOutput,
         toolUses: parser.state.toolUses,
         touchedFiles: parser.state.touchedFiles,
-        stderr,
+        stderr: sanitizeClaudeDiagnostic(stderr, env),
         pid: proc.pid,
         pidIdentity,
       });
@@ -862,7 +904,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
         structuredOutput: null,
         toolUses: [],
         touchedFiles: [],
-        stderr: err.message,
+        stderr: sanitizeClaudeDiagnostic(err.message, env),
         pid: proc.pid,
         pidIdentity,
       });
@@ -879,17 +921,12 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
  * Execute a review (non-streaming, no session persistence).
  *
  * The default allowlist is `SANDBOX_REVIEW_TOOLS` (Read/Glob/Grep/Web + the git
- * MCP tool surface). Callers that want to run with an alternative allowlist —
- * e.g., legacy `SANDBOX_READ_ONLY_TOOLS` for back-compat — can override via
- * `options.allowedTools`. Bash is intentionally excluded by default.
+ * MCP tool surface). Callers may narrow it, but cannot add mutable capabilities.
+ * Inherited settings and hooks are disabled; explicit Git MCP remains enabled.
  */
 export async function runClaudeReview(cwd, prompt, options = {}) {
   // Use streaming mode (same as runClaudeTurn) for progress reporting
-  const result = await runClaudeTurn(cwd, prompt, {
-    noSessionPersistence: true,
-    allowedTools: SANDBOX_REVIEW_TOOLS,
-    ...options,
-  });
+  const result = await runClaudeTurn(cwd, prompt, reviewExecutionOptions(options));
 
   return {
     status: result.status,

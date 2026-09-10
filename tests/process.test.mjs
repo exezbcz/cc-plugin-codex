@@ -4,6 +4,9 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
 
 import {
   runCommand,
@@ -361,6 +364,21 @@ describe("isProcessAlive", () => {
 // ---------------------------------------------------------------------------
 
 describe("getProcessIdentity", () => {
+  it("uses only the macOS process birth time, excluding the mutable command name", () => {
+    let capturedArgs;
+    const identity = getProcessIdentity(12345, {
+      platform: "darwin",
+      runCommandCheckedImpl: (command, args) => {
+        assert.equal(command, "ps");
+        capturedArgs = args;
+        return { stdout: "Wed Sep  9 12:34:56 2026\n" };
+      },
+    });
+
+    assert.deepEqual(capturedArgs, ["-o", "lstart=", "-p", "12345"]);
+    assert.equal(identity, "Wed Sep 9 12:34:56 2026");
+  });
+
   it("returns a non-empty string for the current process", () => {
     const identity = getProcessIdentity(process.pid);
     assert.ok(typeof identity === "string");
@@ -372,9 +390,74 @@ describe("getProcessIdentity", () => {
     const id2 = getProcessIdentity(process.pid);
     assert.equal(id1, id2);
   });
+
+  it("keeps the same identity when a shell execs a different program at the same PID", {
+    skip: process.platform === "win32",
+    timeout: 15_000,
+  }, async () => {
+    const child = spawn("/bin/sh", [
+      "-c",
+      'printf "ready\\n"; read -r signal; exec "$1" -e "$2"',
+      "process-identity-test",
+      NODE_BIN,
+      'process.stdout.write(`node:${process.pid}\\n`); setInterval(() => {}, 1000);',
+    ], { detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    const lines = createInterface({ input: child.stdout });
+    const nextLine = () => once(lines, "line", { signal: AbortSignal.timeout(5_000) });
+    try {
+      assert.deepEqual(await nextLine(), ["ready"]);
+      const pid = child.pid;
+      const identity = getProcessIdentity(pid);
+      const commandBefore = runCommandChecked("ps", ["-o", "comm=", "-p", String(pid)]).stdout.trim();
+
+      child.stdin.end("continue\n");
+      assert.deepEqual(await nextLine(), [`node:${pid}`]);
+      const commandAfter = runCommandChecked("ps", ["-o", "comm=", "-p", String(pid)]).stdout.trim();
+
+      assert.notEqual(commandBefore, commandAfter);
+      assert.equal(getProcessIdentity(pid), identity);
+      assert.equal(validateProcessIdentity(pid, identity), true);
+      if (process.platform === "darwin") {
+        assert.equal(validateProcessIdentity(pid, `${identity} ${commandBefore}`), true);
+      }
+
+      const closed = once(child, "close", { signal: AbortSignal.timeout(5_000) });
+      assert.equal(terminateProcessTree(pid).delivered, true);
+      await closed;
+      assert.equal(validateProcessIdentity(pid, identity), false);
+    } finally {
+      lines.close();
+      if (child.exitCode === null && child.signalCode === null) {
+        const closed = once(child, "close", { signal: AbortSignal.timeout(5_000) });
+        child.kill("SIGKILL");
+        await closed;
+      }
+    }
+  });
 });
 
 describe("validateProcessIdentity", () => {
+  it("accepts an older macOS identity record after its executable name changes", () => {
+    assert.equal(validateProcessIdentity(12345, "Wed Sep  9 12:34:56 2026 /bin/sh", {
+      platform: "darwin",
+      identityImpl: () => "Wed Sep 9 12:34:56 2026",
+    }), true);
+  });
+
+  it("rejects a reused macOS PID with a different birth time even for the same executable", () => {
+    assert.equal(validateProcessIdentity(12345, "Wed Sep 9 12:34:56 2026 /bin/sh", {
+      platform: "darwin",
+      identityImpl: () => "Wed Sep 9 12:34:57 2026 /bin/sh",
+    }), false);
+  });
+
+  it("does not normalize birth-time records on other platforms", () => {
+    assert.equal(validateProcessIdentity(12345, "Wed Sep 9 12:34:56 2026 /bin/sh", {
+      platform: "linux",
+      identityImpl: () => "Wed Sep 9 12:34:56 2026",
+    }), false);
+  });
+
   it("returns true when identity matches", () => {
     const identity = getProcessIdentity(process.pid);
     assert.equal(validateProcessIdentity(process.pid, identity), true);

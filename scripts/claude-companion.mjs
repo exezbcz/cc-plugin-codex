@@ -34,10 +34,12 @@ import {
   resolveExpectedPluginDataRoot,
   resolvePluginCacheInstallInfo,
   resolveWritablePluginDataRoots,
+  resolvePluginStateRoot,
 } from "./lib/codex-paths.mjs";
 import {
   getClaudeAvailability,
   getClaudeAuthStatus,
+  reviewExecutionOptions,
   runClaudeTurn,
   runClaudeReview,
   runClaudeAdversarialReview,
@@ -77,6 +79,7 @@ import {
   ensureStateDir,
   generateJobId,
   getConfig,
+  resolveWorkspaceHash,
   getCurrentSession,
   getCurrentSessionMarker,
   listJobs,
@@ -136,7 +139,7 @@ function printUsage() {
   console.log(
     [
       "Usage:",
-      "  node scripts/claude-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
+      "  node scripts/claude-companion.mjs setup [--check|--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--effort <low|medium|high|xhigh|max>]",
       "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--effort <low|medium|high|xhigh|max>] [focus text]",
       "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model>] [--effort <low|medium|high|xhigh|max>] [prompt]",
@@ -147,7 +150,9 @@ function printUsage() {
       "  node scripts/claude-companion.mjs background-routing-context --kind <review|task> [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs task-resume-candidate [--json]",
       "  node scripts/claude-companion.mjs task-reserve-job [--json]",
-      "  node scripts/claude-companion.mjs review-reserve-job [--json]"
+      "  node scripts/claude-companion.mjs review-reserve-job [--json]",
+      "  Auth: CC_PLUGIN_CODEX_AUTH_MODE=inherit (default) or subscription (reject API/provider overrides).",
+      "  setup --check reports diagnostics without changing hooks, config or plugin state."
     ].join("\n")
   );
 }
@@ -542,18 +547,14 @@ function checkHooksStatus() {
   };
 }
 
-function ensureClaudeReady(cwd) {
-  const authStatus = getClaudeAuthStatus(cwd);
+function ensureClaudeReady(cwd, options = {}) {
+  const authStatus = getClaudeAuthStatus(cwd, options);
   if (!authStatus.available) {
     throw new Error(
       "Claude Code CLI is not installed or is missing required runtime support. Install it, then rerun `$cc:setup`."
     );
   }
-  if (!authStatus.loggedIn) {
-    throw new Error(
-      "Claude Code CLI is not authenticated. Run `claude auth login` and retry."
-    );
-  }
+  if (!authStatus.ready) throw new Error(authStatus.detail);
 }
 
 function buildSetupReport(
@@ -562,6 +563,7 @@ function buildSetupReport(
   hookTrust = null,
   {
     pluginStateReady = true,
+    pluginStateVerified = true,
     pluginStateDetail = "plugin-data writable root verified",
     pluginStateNextStep = null,
     pluginConfig = null,
@@ -572,19 +574,23 @@ function buildSetupReport(
   const authStatus = getClaudeAuthStatus(cwd);
   const hooksStatus = checkHooksStatus();
   const config = pluginStateReady ? pluginConfig : null;
+  const integrationVerified = hookTrust?.ready === true && pluginStateVerified;
 
   const nextSteps = [];
   if (!claudeStatus.available) {
     nextSteps.push("Install Claude Code CLI.");
   }
-  if (claudeStatus.available && !authStatus.loggedIn) {
-    nextSteps.push("Run `claude auth login`.");
+  if (claudeStatus.available && !authStatus.ready) {
+    nextSteps.push(authStatus.detail);
+    nextSteps.push(...authStatus.conflicts);
   }
   if (!hooksStatus.installed) {
     nextSteps.push("Run `$cc:setup` again after enabling native Codex plugin hooks.");
   }
   if (hookTrust?.ready === false) {
     nextSteps.push("Open `/hooks` and trust this plugin's hooks manually, then rerun `$cc:setup`.");
+  } else if (!integrationVerified) {
+    nextSteps.push("Hook trust and sandbox write access are not verified by this diagnostic check.");
   }
   if (!pluginStateReady) {
     nextSteps.push(
@@ -597,21 +603,26 @@ function buildSetupReport(
     );
   }
 
-  return {
-    ready:
+  const ready =
       nodeStatus.available &&
       claudeStatus.available &&
-      authStatus.loggedIn &&
+      authStatus.ready &&
       hooksStatus.installed &&
-      hookTrust?.ready !== false &&
-      pluginStateReady,
+      integrationVerified &&
+      pluginStateReady;
+  return {
+    ready,
+    integrationStatus: !integrationVerified ? "not_verified" : ready ? "ready" : "needs_attention",
+    localAuthReady: authStatus.ready,
     node: nodeStatus,
     claude: claudeStatus,
     auth: authStatus,
     hooks: hooksStatus,
     hookTrust,
     pluginState: {
-      ready: pluginStateReady,
+      ready: pluginStateVerified ? pluginStateReady : null,
+      accessible: pluginStateReady,
+      writeAccessVerified: pluginStateVerified,
       detail: pluginStateDetail,
     },
     reviewGateEnabled: config ? Boolean(config.stopReviewGate) : null,
@@ -627,7 +638,7 @@ function buildSetupReport(
 async function handleSetup(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json", "enable-review-gate", "disable-review-gate"]
+    booleanOptions: ["json", "check", "enable-review-gate", "disable-review-gate"]
   });
 
   if (options["enable-review-gate"] && options["disable-review-gate"]) {
@@ -637,6 +648,39 @@ async function handleSetup(argv) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const actionsTaken = [];
+
+  if (options.check) {
+    if (options["enable-review-gate"] || options["disable-review-gate"]) {
+      throw new Error("--check cannot be combined with review-gate changes.");
+    }
+    const dataRoot = resolveExpectedPluginDataRoot();
+    let pluginStateReady = false;
+    try {
+      fs.accessSync(dataRoot, fs.constants.R_OK | fs.constants.W_OK);
+      pluginStateReady = fs.statSync(dataRoot).isDirectory();
+    } catch { /* Checking must not create or migrate plugin state. */ }
+    let pluginConfig = null;
+    try {
+      pluginConfig = JSON.parse(fs.readFileSync(path.join(
+        resolvePluginStateRoot(), resolveWorkspaceHash(workspaceRoot), "config.json"
+      ), "utf8"));
+    } catch { /* Uninitialized workspaces have no saved review-gate config. */ }
+    const report = buildSetupReport(cwd, [], {
+      attempted: false, ready: null, found: 0, trusted: 0,
+      detail: "hook trust not checked or changed in read-only mode",
+    }, {
+      pluginStateReady,
+      pluginStateVerified: false,
+      pluginStateDetail: pluginStateReady
+        ? "plugin data root is accessible; sandbox write access was not tested"
+        : "plugin data root is absent or inaccessible; no state was created",
+      pluginStateNextStep: "Run setup without --check to configure plugin state and hooks.",
+      pluginConfig,
+    });
+    report.checkOnly = true;
+    outputResult(options.json ? report : renderSetupReport(report), options.json);
+    return;
+  }
 
   if (configureNativePluginHooks()) {
     actionsTaken.push(
@@ -772,7 +816,7 @@ function buildReviewPrompt(context) {
 // ---------------------------------------------------------------------------
 
 async function executeReviewRun(request) {
-  ensureClaudeReady(request.cwd);
+  ensureClaudeReady(request.cwd, reviewExecutionOptions());
   ensureGitRepository(request.cwd);
 
   // Sweep dead resources from previous crashed runs before allocating new ones.

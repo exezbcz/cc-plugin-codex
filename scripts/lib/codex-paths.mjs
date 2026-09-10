@@ -8,7 +8,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PLUGIN_DATA_NAMESPACE = "cc";
-export const LEGACY_PLUGIN_DATA_NAMESPACES = ["cc", "claude-code"];
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -111,16 +110,9 @@ export function resolvePluginDataRoot(namespace) {
 export function resolveWritablePluginDataRoots(
   primaryRoot = resolveExpectedPluginDataRoot()
 ) {
-  const roots = [
-    primaryRoot,
-    ...LEGACY_PLUGIN_DATA_NAMESPACES.map((namespace) =>
-      resolvePluginDataRoot(namespace)
-    ),
-  ];
-  return roots.filter(
-    (candidate, index) =>
-      !roots.slice(0, index).some((previous) => samePath(previous, candidate))
-  );
+  // Only grant this installation's data root. Legacy namespaces can be owned
+  // by another plugin copy and are never migrated implicitly.
+  return [primaryRoot];
 }
 
 export function resolvePluginStateRoot(namespace) {

@@ -121,8 +121,8 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 
-if (args[0] === "auth" && args[1] === "status") {
-  process.stdout.write("authenticated\\n");
+if (args.includes("auth") && args.includes("status")) {
+  process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", subscriptionType: "max" }) + "\\n");
   process.exit(0);
 }
 
@@ -184,6 +184,8 @@ function createHookEnvironment(options = {}) {
       ...process.env,
       HOME: homeDir,
       USERPROFILE: homeDir,
+      CC_PLUGIN_CODEX_CLAUDE_BIN: path.join(binDir, "claude"),
+      CC_PLUGIN_CODEX_AUTH_MODE: "inherit",
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };
@@ -338,6 +340,25 @@ describe("hooks", () => {
         `${eventName} is not an upstream Codex hook event`
       );
     }
+  });
+
+  it("subscription gate preflight ignores credential helpers excluded by review settings", () => {
+    const testEnv = createHookEnvironment();
+    try {
+      const stateDir = stateDirFor(testEnv.homeDir, testEnv.workspaceDir);
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(path.join(stateDir, "config.json"), JSON.stringify({ version: 1, stopReviewGate: true }));
+      const claudeDir = path.join(testEnv.homeDir, ".claude");
+      fs.mkdirSync(claudeDir);
+      fs.writeFileSync(path.join(claudeDir, "settings.json"), JSON.stringify({ apiKeyHelper: "false" }));
+      const env = { ...testEnv.env, CLAUDE_CONFIG_DIR: claudeDir, CC_PLUGIN_CODEX_AUTH_MODE: "subscription" };
+      for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE",
+        "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SIMPLE"]) delete env[key];
+      const result = runHook(STOP_HOOK, [], { cwd: testEnv.workspaceDir, last_assistant_message: "review me" }, env);
+      assert.equal(result.stdout.trim(), "");
+      assert.match(result.stderr, /turn-end review passed/i);
+    } finally { cleanupHookEnvironment(testEnv); }
   });
 
   it("stop-review hook uses read-only sandbox and git MCP when review gate is enabled", () => {

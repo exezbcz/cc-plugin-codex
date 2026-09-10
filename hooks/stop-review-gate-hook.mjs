@@ -36,6 +36,7 @@ import {
 import {
   getClaudeAvailability,
   getClaudeAuthStatus,
+  reviewExecutionOptions,
   cleanupReviewMcpConfig,
   cleanupSandboxSettings,
   createReviewMcpConfig,
@@ -87,8 +88,8 @@ function buildSetupNote(cwd) {
     return `Claude Code is not set up for the review gate. ${availability.detail}. Run $cc:setup.`;
   }
 
-  const authStatus = getClaudeAuthStatus(cwd);
-  if (!authStatus.loggedIn) {
+  const authStatus = getClaudeAuthStatus(cwd, reviewExecutionOptions());
+  if (!authStatus.ready) {
     const detail = authStatus.detail ? ` ${authStatus.detail}.` : "";
     return `Claude Code is not set up for the review gate.${detail} Run $cc:setup and, if needed, \`claude auth login\`.`;
   }

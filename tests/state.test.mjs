@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 // State paths are workspace-hash based and resolveWorkspaceRoot() shells out to
 // git, so most tests use a real git repo cwd. A dedicated subprocess test below
-// covers the HOME/CODEX_HOME-specific migration path.
+// covers installation-scoped state without cross-namespace migration.
 
 import {
   MAX_STOP_REVIEW_HISTORY_ENTRIES,
@@ -48,12 +48,12 @@ const PROJECT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const PROJECT_VERSION = JSON.parse(
   fs.readFileSync(path.join(PROJECT_CWD, "package.json"), "utf8")
 ).version;
-function installCachedStateModule(codexHome) {
+function installCachedStateModule(codexHome, marketplaceName = "sendbird") {
   const pluginRoot = path.join(
     codexHome,
     "plugins",
     "cache",
-    "sendbird",
+    marketplaceName,
     "cc",
     PROJECT_VERSION
   );
@@ -74,6 +74,19 @@ function createTempGitRepo() {
     throw new Error(`git init failed: ${result.stderr || result.stdout}`);
   }
   return dir;
+}
+
+function snapshotDirectory(root, relative = "") {
+  const snapshot = [];
+  for (const entry of fs.readdirSync(path.join(root, relative), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const file = path.join(relative, entry.name);
+    if (entry.isDirectory()) {
+      snapshot.push([file, "directory"], ...snapshotDirectory(root, file));
+    } else {
+      snapshot.push([file, fs.readFileSync(path.join(root, file))]);
+    }
+  }
+  return snapshot;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,8 +191,8 @@ describe("loadConfig / saveConfig", () => {
     assert.equal(cfg.stopReviewGate, true);
   });
 
-  it("migrates legacy plugin state into Codex's injected data root and prunes old armed markers", () => {
-    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-state-migrate-"));
+  for (const withExistingState of [false, true]) it(`preserves foreign state byte-for-byte with ${withExistingState ? "colliding" : "empty"} selected state`, () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-state-ownership-"));
     const codexHome = path.join(homeDir, ".codex");
     const repoDir = createTempGitRepo();
 
@@ -189,40 +202,43 @@ describe("loadConfig / saveConfig", () => {
         .update(realWorkspace)
         .digest("hex")
         .slice(0, 12);
-      const legacyCcStateDir = path.join(
-        codexHome,
-        "plugins",
-        "data",
-        "cc",
-        "state",
-        workspaceHash
-      );
-      const legacyClaudeStateDir = path.join(
-        codexHome,
-        "plugins",
-        "data",
-        "claude-code",
-        "state",
-        workspaceHash
-      );
       const nextStateDir = path.join(
         codexHome,
         "plugins",
         "data",
-        "cc-sendbird",
+        "cc-personal",
         "state",
         workspaceHash
       );
-      const cachedStateModuleUrl = installCachedStateModule(codexHome);
+      const cachedStateModuleUrl = installCachedStateModule(codexHome, "personal");
+      const currentConfig = JSON.stringify({ version: 1, stopReviewGate: false, owner: "selected" }) + "\n";
+      const currentJob = JSON.stringify({ id: "shared", status: "completed", owner: "selected" }) + "\n";
+      if (withExistingState) {
+        fs.mkdirSync(path.join(nextStateDir, "jobs"), { recursive: true });
+        fs.writeFileSync(path.join(nextStateDir, "config.json"), currentConfig);
+        fs.writeFileSync(path.join(nextStateDir, "jobs", "shared.json"), currentJob);
+        for (const file of ["config.json", "jobs/shared.json"]) {
+          fs.utimesSync(path.join(nextStateDir, file), 1_700_000_000, 1_700_000_000);
+        }
+      }
 
-      fs.mkdirSync(legacyCcStateDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(legacyCcStateDir, "config.json"),
-        JSON.stringify({ version: 1, stopReviewGate: true }, null, 2) + "\n",
-        "utf8"
-      );
-      fs.mkdirSync(legacyClaudeStateDir, { recursive: true });
-      fs.writeFileSync(path.join(legacyClaudeStateDir, "armed-old-session"), "", "utf8");
+      const foreignSnapshots = new Map();
+      for (const namespace of ["cc", "claude-code", "cc-sendbird"]) {
+        const foreignRoot = path.join(codexHome, "plugins", "data", namespace);
+        const foreignStateDir = path.join(foreignRoot, "state", workspaceHash);
+        fs.mkdirSync(path.join(foreignStateDir, "jobs"), { recursive: true });
+        const files = new Map([
+          ["config.json", JSON.stringify({ version: 1, stopReviewGate: true, owner: namespace }) + "\n"],
+          ["jobs/shared.json", JSON.stringify({ id: "shared", status: "completed", owner: namespace }) + "\n"],
+          ["armed-old-session", `foreign marker: ${namespace}\n`],
+        ]);
+        for (const [file, content] of files) {
+          fs.writeFileSync(path.join(foreignStateDir, file), content);
+          // The removed merge logic preferred newer foreign collisions.
+          fs.utimesSync(path.join(foreignStateDir, file), 1_700_000_010, 1_700_000_010);
+        }
+        foreignSnapshots.set(foreignRoot, snapshotDirectory(foreignRoot));
+      }
 
       const result = spawnSync(
         process.execPath,
@@ -232,9 +248,11 @@ describe("loadConfig / saveConfig", () => {
           `
             const mod = await import(${JSON.stringify(cachedStateModuleUrl)});
             const cwd = ${JSON.stringify(repoDir)};
+            mod.ensureStateDir(cwd);
             console.log(JSON.stringify({
               stateDir: mod.resolveStateDir(cwd),
-              config: mod.getConfig(cwd)
+              config: mod.getConfig(cwd),
+              job: mod.readJobFile(cwd, "shared")
             }));
           `,
         ],
@@ -253,18 +271,26 @@ describe("loadConfig / saveConfig", () => {
       assert.equal(result.status, 0, result.stderr || result.stdout);
       const payload = JSON.parse(result.stdout);
       assert.equal(payload.stateDir, nextStateDir);
-      assert.equal(payload.config.stopReviewGate, true);
-      assert.equal(fs.existsSync(path.join(nextStateDir, "config.json")), true);
-      assert.equal(fs.existsSync(path.join(legacyCcStateDir, "config.json")), false);
-      assert.equal(fs.existsSync(legacyClaudeStateDir), false);
-      assert.equal(fs.existsSync(path.join(nextStateDir, "armed-old-session")), false);
+      assert.equal(payload.config.stopReviewGate, false);
+      if (withExistingState) {
+        assert.equal(payload.config.owner, "selected");
+        assert.equal(payload.job.owner, "selected");
+        assert.equal(fs.readFileSync(path.join(nextStateDir, "config.json"), "utf8"), currentConfig);
+        assert.equal(fs.readFileSync(path.join(nextStateDir, "jobs", "shared.json"), "utf8"), currentJob);
+      } else {
+        assert.equal(payload.job, null);
+        assert.equal(fs.existsSync(path.join(nextStateDir, "config.json")), false);
+      }
+      for (const [foreignRoot, before] of foreignSnapshots) {
+        assert.deepEqual(snapshotDirectory(foreignRoot), before);
+      }
     } finally {
       fs.rmSync(homeDir, { recursive: true, force: true });
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
   });
 
-  it("does not migrate a legacy root into an injected symlink to itself", () => {
+  it("keeps an explicitly configured symlink-equivalent selected root usable", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-state-alias-"));
     const codexHome = path.join(homeDir, ".codex");
     const repoDir = createTempGitRepo();

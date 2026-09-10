@@ -141,14 +141,13 @@ describe("plugin data paths", () => {
     );
   });
 
-  it("includes legacy namespaces needed to migrate marketplace plugin state", () => {
+  it("grants only the selected installation's root, excluding legacy and other namespaces", () => {
     const primaryRoot = resolveMarketplacePluginDataRoot("sendbird");
 
     assert.deepEqual(resolveWritablePluginDataRoots(primaryRoot), [
       primaryRoot,
-      resolvePluginDataRoot("cc"),
-      resolvePluginDataRoot("claude-code"),
     ]);
+    assert.deepEqual(resolveWritablePluginDataRoots(), [resolveExpectedPluginDataRoot()]);
   });
 
   it("does not trust injected environment paths for persistent writable roots", () => {

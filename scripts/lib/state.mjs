@@ -6,7 +6,7 @@
  * State management — adapted for Codex plugin.
  * Key changes from original:
  * - Plugin-owned state under the cc plugin data namespace
- * - Legacy claude-code namespace migration
+ * - Installation-scoped state without automatic cross-namespace migration
  * - Workspace-hash isolation
  * - Config/job separation in filesystem
  * - CAS for job status transitions
@@ -18,11 +18,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  LEGACY_PLUGIN_DATA_NAMESPACES,
   resolvePluginDataRoot,
   resolvePluginStateRoot,
-  resolvePluginsDataRoot,
-  samePath,
 } from "./codex-paths.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 import { isProcessAlive, validateProcessIdentity, getProcessIdentity } from "./process.mjs";
@@ -56,94 +53,6 @@ function defaultConfig() {
   };
 }
 
-function movePath(sourcePath, destinationPath) {
-  try {
-    fs.renameSync(sourcePath, destinationPath);
-  } catch (error) {
-    if (error?.code !== "EXDEV") {
-      throw error;
-    }
-    fs.cpSync(sourcePath, destinationPath, {
-      recursive: true,
-      force: true,
-      errorOnExist: false,
-    });
-    fs.rmSync(sourcePath, { recursive: true, force: true });
-  }
-}
-
-function removeIfEmpty(dirPath) {
-  try {
-    if (fs.readdirSync(dirPath).length === 0) {
-      fs.rmdirSync(dirPath);
-    }
-  } catch {}
-}
-
-function canonicalPath(candidate) {
-  try {
-    return fs.realpathSync.native(candidate);
-  } catch {
-    return path.resolve(candidate);
-  }
-}
-
-function mergeDirectory(sourceDir, destinationDir) {
-  fs.mkdirSync(destinationDir, { recursive: true, mode: 0o700 });
-
-  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
-    const sourcePath = path.join(sourceDir, entry.name);
-    const destinationPath = path.join(destinationDir, entry.name);
-
-    if (entry.isDirectory()) {
-      if (fs.existsSync(destinationPath) && !fs.statSync(destinationPath).isDirectory()) {
-        fs.rmSync(destinationPath, { recursive: true, force: true });
-      }
-      mergeDirectory(sourcePath, destinationPath);
-      removeIfEmpty(sourcePath);
-      continue;
-    }
-
-    if (!fs.existsSync(destinationPath)) {
-      movePath(sourcePath, destinationPath);
-      continue;
-    }
-
-    const sourceStat = fs.statSync(sourcePath);
-    const destinationStat = fs.statSync(destinationPath);
-    if (sourceStat.mtimeMs > destinationStat.mtimeMs) {
-      fs.rmSync(destinationPath, { recursive: true, force: true });
-      movePath(sourcePath, destinationPath);
-    } else {
-      fs.rmSync(sourcePath, { recursive: true, force: true });
-    }
-  }
-}
-
-function migrateLegacyPluginDataRoots() {
-  const pluginsDataRoot = resolvePluginsDataRoot();
-  const destinationRoot = resolvePluginDataRoot();
-  fs.mkdirSync(pluginsDataRoot, { recursive: true, mode: 0o700 });
-
-  for (const legacyNamespace of LEGACY_PLUGIN_DATA_NAMESPACES) {
-    const legacyRoot = resolvePluginDataRoot(legacyNamespace);
-    if (
-      !fs.existsSync(legacyRoot) ||
-      samePath(canonicalPath(legacyRoot), canonicalPath(destinationRoot))
-    ) {
-      continue;
-    }
-
-    if (!fs.existsSync(destinationRoot)) {
-      movePath(legacyRoot, destinationRoot);
-      continue;
-    }
-
-    mergeDirectory(legacyRoot, destinationRoot);
-    fs.rmSync(legacyRoot, { recursive: true, force: true });
-  }
-}
-
 function cleanupLegacyStateArtifacts(stateRoot) {
   if (!fs.existsSync(stateRoot)) {
     return;
@@ -171,7 +80,8 @@ function ensurePluginDataLayout() {
   if (ensuredPluginDataRoot === destinationRoot) {
     return;
   }
-  migrateLegacyPluginDataRoots();
+  // Legacy namespaces may belong to another installation. Never import, move,
+  // merge, or remove them as a side effect of reading this installation's state.
   cleanupLegacyStateArtifacts(resolvePluginStateRoot());
   ensuredPluginDataRoot = destinationRoot;
 }

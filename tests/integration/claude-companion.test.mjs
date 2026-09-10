@@ -58,8 +58,8 @@ async function main() {
     return;
   }
 
-  if (args[0] === "auth" && args[1] === "status") {
-    process.stdout.write("authenticated\\n");
+  if (args.includes("auth") && args.includes("status")) {
+    process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", subscriptionType: "max" }) + "\\n");
     return;
   }
 
@@ -169,6 +169,8 @@ function createTestEnvironment() {
       HOME: homeDir,
       USERPROFILE: homeDir,
       CODEX_HOME: path.join(homeDir, ".codex"),
+      CC_PLUGIN_CODEX_CLAUDE_BIN: path.join(binDir, "claude"),
+      CC_PLUGIN_CODEX_AUTH_MODE: "inherit",
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };
@@ -881,13 +883,6 @@ describe("claude-companion integration", () => {
           value: [
             testEnv.workspaceDir,
             path.join(testEnv.homeDir, ".codex", "plugins", "data", "cc"),
-            path.join(
-              testEnv.homeDir,
-              ".codex",
-              "plugins",
-              "data",
-              "claude-code"
-            ),
           ],
           mergeStrategy: "replace",
         },

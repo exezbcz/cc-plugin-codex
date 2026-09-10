@@ -143,10 +143,14 @@ export function formatCommandFailure(result) {
  * Get stable process identity for PID reuse detection.
  * Returns a string that is immutable for the process lifetime.
  */
-export function getProcessIdentity(pid) {
-  if (process.platform === 'darwin') {
-    const row = runCommandChecked('ps', ['-o', 'lstart=,comm=', '-p', String(pid)]);
-    return row.stdout.trim();
+export function getProcessIdentity(pid, options = {}) {
+  const platform = options.platform ?? process.platform;
+  if (platform === 'darwin') {
+    const runCommandCheckedImpl = options.runCommandCheckedImpl ?? runCommandChecked;
+    // exec() keeps the PID and birth time but changes comm (for example when a
+    // shell wrapper replaces itself with Claude). Only birth time is identity.
+    const row = runCommandCheckedImpl('ps', ['-o', 'lstart=', '-p', String(pid)]);
+    return normalizeDarwinProcessIdentity(row.stdout.trim());
   } else {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     const closeParen = stat.lastIndexOf(')');
@@ -155,10 +159,25 @@ export function getProcessIdentity(pid) {
   }
 }
 
+function normalizeDarwinProcessIdentity(identity) {
+  if (typeof identity !== "string") return identity;
+  // Older jobs stored `lstart,comm`. Accept those records without treating the
+  // executable name as identity; still compare the entire process birth time.
+  const birthTime = identity.match(
+    /^([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})(?:\s|$)/,
+  );
+  return birthTime ? birthTime[1].replace(/\s+/g, " ") : identity;
+}
+
 export function validateProcessIdentity(pid, expectedIdentity, options = {}) {
   const identityImpl = options.identityImpl ?? getProcessIdentity;
   try {
-    return identityImpl(pid) === expectedIdentity;
+    const actualIdentity = identityImpl(pid);
+    if ((options.platform ?? process.platform) === "darwin") {
+      return normalizeDarwinProcessIdentity(actualIdentity) ===
+        normalizeDarwinProcessIdentity(expectedIdentity);
+    }
+    return actualIdentity === expectedIdentity;
   } catch (error) {
     // A denied probe (sandboxed `ps`, unreadable /proc entry) means the identity
     // cannot be established, not that the process is gone. Fall back to the

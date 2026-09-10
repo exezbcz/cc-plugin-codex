@@ -10,6 +10,8 @@ import path from "node:path";
 
 import {
   buildArgs,
+  reviewExecutionOptions,
+  REVIEW_BUILTIN_TOOLS,
   SANDBOX_READ_ONLY_BASH_TOOLS,
   SANDBOX_READ_ONLY_TOOLS,
   SANDBOX_REVIEW_TOOLS,
@@ -362,6 +364,50 @@ describe("createReviewMcpConfig", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildArgs review mode", () => {
+  it("removes mutable builtins instead of only pre-approving read tools", () => {
+    const args = buildArgs("p", reviewExecutionOptions({ permissionMode: "bypassPermissions", tools: ["Bash", "Write"] }));
+    assert.ok(argsHas(args, "--tools", REVIEW_BUILTIN_TOOLS.join(",")));
+    assert.ok(argsHas(args, "--permission-mode", "dontAsk"));
+    assert.ok(!args[args.indexOf("--tools") + 1].includes("Bash"));
+    assert.ok(!args[args.indexOf("--tools") + 1].includes("Write"));
+  });
+
+  it("disables inherited settings/hooks/plugins but retains the explicitly bundled Git MCP", () => {
+    const args = buildArgs("p", reviewExecutionOptions({ mcpConfigFile: "/tmp/bundled-git.json" }));
+    assert.ok(argsHas(args, "--setting-sources", ""));
+    const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+    assert.equal(settings.disableAllHooks, true);
+    assert.equal(settings.disableClaudeAiConnectors, true);
+    assert.deepEqual(settings.enabledPlugins, {});
+    assert.ok(args.includes("--disable-slash-commands"));
+    assert.ok(args.includes("--no-chrome"));
+    assert.ok(args.includes("--strict-mcp-config"));
+    assert.ok(argsHas(args, "--mcp-config", "/tmp/bundled-git.json"));
+    assert.ok(REVIEW_MCP_ALLOWED_TOOLS.every((tool) => argsAllowedTools(args).includes(tool)));
+    assert.ok(!args.includes("--bare"));
+    assert.ok(!args.includes("--safe-mode"), "safe-mode would also disable the explicit MCP server");
+  });
+
+  it("allows a stop review to remove web access without exposing other tools", () => {
+    const options = reviewExecutionOptions({ allowedTools: SANDBOX_STOP_REVIEW_TOOLS });
+    assert.deepEqual(options.tools, ["Read", "Glob", "Grep"]);
+    assert.deepEqual(options.allowedTools, SANDBOX_STOP_REVIEW_TOOLS);
+    assert.throws(() => reviewExecutionOptions({ allowedTools: ["Read", "Bash"] }), /subset/);
+  });
+
+  it("uses an empty explicit MCP configuration when no bundled config is supplied", () => {
+    const args = buildArgs("p", reviewExecutionOptions());
+    assert.ok(argsHas(args, "--mcp-config", '{"mcpServers":{}}'));
+    assert.ok(args.includes("--strict-mcp-config"));
+  });
+
+  it("does not change implementation execution permissions or settings inheritance", () => {
+    const args = buildArgs("p", { permissionMode: "bypassPermissions" });
+    assert.ok(argsHas(args, "--permission-mode", "bypassPermissions"));
+    assert.ok(!args.includes("--tools"));
+    assert.ok(!args.includes("--setting-sources"));
+  });
+
   it("emits --mcp-config when mcpConfigFile is provided", () => {
     const args = buildArgs("p", { mcpConfigFile: "/tmp/mcp.json" });
     assert.ok(argsHas(args, "--mcp-config", "/tmp/mcp.json"));

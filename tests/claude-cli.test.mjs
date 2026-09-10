@@ -32,6 +32,36 @@ import {
 // ===========================================================================
 
 describe("StreamParser", () => {
+  it("does not report terminal errors or exhausted turns as completed at exit zero", () => {
+    for (const result of [
+      { is_error: true },
+      { is_error: false, subtype: "error_max_turns" },
+      { subtype: "error_during_execution" },
+    ]) {
+      const parser = new StreamParser();
+      parser.feed(JSON.stringify({ type: "result", result: "failure", ...result }) + "\n");
+      const validation = validateTurnCompletion(parser.state, 0);
+      assert.equal(validation.status, "failed");
+      assert.equal(validation.warning, "Claude reported a failed terminal result.");
+    }
+  });
+
+  it("exposes a denial count without retaining denied tool inputs", () => {
+    const parser = new StreamParser();
+    parser.feed(JSON.stringify({ type: "result", subtype: "success", is_error: false,
+      permission_denials: [{ tool_name: "Write", tool_input: { content: "synthetic-secret" } }],
+    }) + "\n");
+    assert.equal(validateTurnCompletion(parser.state, 0).status, "completed");
+    assert.match(validateTurnCompletion(parser.state, 0).warning, /^1 tool request/);
+    assert.doesNotMatch(JSON.stringify(parser.state), /synthetic-secret/);
+  });
+
+  it("marks an unknown terminal subtype uncertain instead of claiming success", () => {
+    const parser = new StreamParser();
+    parser.feed(JSON.stringify({ type: "result", subtype: "future_protocol_value" }) + "\n");
+    assert.equal(validateTurnCompletion(parser.state, 0).status, "unknown");
+  });
+
   // ---- basic event parsing ------------------------------------------------
 
   it("parses a result event and marks receivedTerminalEvent", () => {
