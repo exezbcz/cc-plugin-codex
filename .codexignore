@@ -1,7 +1,29 @@
 # Local dependencies and generated packaging output
 node_modules/
 *.tgz
+.git/
+.github/
+tests/
 
 # Local scratch and notes
 tasks/
 .DS_Store
+work/
+outputs/
+logs/
+jobs/
+transcripts/
+*.log
+*.jsonl
+.env
+.env.*
+.claude/
+.codex/
+.claude.json
+.credentials.json
+auth.json
+credentials.json
+.npmrc
+.netrc
+*.p12
+*.pfx

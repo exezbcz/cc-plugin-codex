@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.1-local.1
+
+- Adapt delegation skills to Codex app and CLI tool capabilities, including continuation of an already-running shell command.
+- Add explicit subscription authentication checks and a read-only `setup --check` path; keep implementation `bypassPermissions` behavior.
+- Restrict review tool availability independently of inherited tool autoapproval.
+- Keep macOS job identity stable across executable changes while retaining process-birth checks.
+- Install, update and uninstall only the selected marketplace identity, preserving other installations and saved results.
+- Remove automatic migration of foreign legacy job data, and distinguish diagnostic-only setup from verified integration readiness.
+- Add public-source checks and publication guidance; exclude credentials, private configuration and runtime artifacts from source distributions. Remove upstream-specific publishing workflows.
+
 ## v1.5.0
 
 - Restore the `SessionEnd` hook. Codex 0.146 dispatches `SessionEnd` for root sessions, so the teardown removed in v1.3.0 as non-dispatched now runs again: it reaps background jobs whose process died and clears this session's current-session marker instead of leaving it to age out after seven days. Teardown stays inside Codex's few-second budget — it never kills or waits on live processes, so detached jobs keep running and the `UserPromptSubmit` sweeper still covers them. Codex trusts hooks one by one, so the new `SessionEnd` hook arrives untrusted and stays inert until you approve it in the Codex hooks browser; the already-trusted `SessionStart`, `Stop`, and `UserPromptSubmit` entries are unaffected, because both the trust key index and the hash are per hook.

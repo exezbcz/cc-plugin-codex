@@ -1,14 +1,10 @@
 {
   "name": "cc",
-  "version": "1.5.0",
+  "version": "1.5.1-local.1",
   "description": "Claude Code Plugin for Codex. Delegate code reviews, investigations, and tracked tasks to Claude Code from inside Codex.",
   "author": {
-    "name": "Sendbird, Inc.",
-    "email": "jin.ku@sendbird.com",
-    "url": "https://sendbird.com/"
+    "name": "CC Companion contributors"
   },
-  "homepage": "https://github.com/sendbird/cc-plugin-codex",
-  "repository": "https://github.com/sendbird/cc-plugin-codex",
   "license": "Apache-2.0",
   "keywords": [
     "claude-code",
@@ -18,20 +14,16 @@
     "agent"
   ],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
   "interface": {
-    "displayName": "Claude Code",
-    "shortDescription": "Claude Code Plugin for Codex",
-    "longDescription": "Use Claude Code from inside Codex to run read-only reviews, adversarial design reviews, and tracked rescue tasks through a Claude-backed runtime with job status and result retrieval.",
-    "developerName": "Sendbird, Inc.",
+    "displayName": "CC Companion",
+    "shortDescription": "Delegate Claude Code work from Codex.",
+    "longDescription": "A maintained Sendbird-derived plugin with subscription checks, resumable jobs, Codex host compatibility, and read-only reviews.",
+    "developerName": "CC Companion contributors",
     "category": "Coding",
     "capabilities": [
       "Interactive",
       "Write"
     ],
-    "websiteURL": "https://sendbird.com/",
-    "privacyPolicyURL": "https://sendbird.com/privacy-notice",
-    "termsOfServiceURL": "https://sendbird.com/terms-of-service",
     "defaultPrompt": [
       "Use Claude Code to review my current changes through $cc:review",
       "Use Claude Code to challenge this implementation through $cc:adversarial-review",
