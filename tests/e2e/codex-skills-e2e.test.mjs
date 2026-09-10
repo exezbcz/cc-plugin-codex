@@ -1,6 +1,7 @@
 /**
  * Copyright 2026 Sendbird, Inc.
  * SPDX-License-Identifier: Apache-2.0
+ * Modified to exercise exposed host schemas with synthetic provider responses.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -82,8 +83,8 @@ async function main() {
     return;
   }
 
-  if (args[0] === "auth" && args[1] === "status") {
-    process.stdout.write("authenticated\\n");
+  if (args.includes("auth") && args.includes("status")) {
+    process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", subscriptionType: "max" }) + "\\n");
     return;
   }
 
@@ -173,9 +174,19 @@ function createEnvironment() {
       HOME: homeDir,
       USERPROFILE: homeDir,
       FAKE_CLAUDE_LOG: claudeLogFile,
+      CC_PLUGIN_CODEX_CLAUDE_BIN: path.join(binDir, "claude"),
+      CC_PLUGIN_CODEX_AUTH_MODE: "inherit",
       PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
     },
   };
+}
+
+function reserveJob(testEnv, kind, cwd = PROJECT_ROOT) {
+  const result = spawnSync(process.execPath, [COMPANION_SCRIPT, "background-routing-context", "--kind", kind, "--cwd", cwd, "--json"], {
+    cwd, env: testEnv.env, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout).jobId;
 }
 
 function installHooks(testEnv) {
@@ -785,6 +796,38 @@ function setupGitWorkspace(workspaceDir) {
   run(["commit", "-m", "initial"]);
 }
 
+const WORKER_EXECUTION_CONTRACT =
+  "Start exactly one companion process in non-interactive foreground mode.\n" +
+  "If the shell tool yields, wait on the same returned process until exit; never relaunch the command.\n" +
+  "Use the host's permitted execution defaults and only supported tool parameters.\n";
+
+function getToolSchema(body, name) {
+  const tool = findTool(body, name)?.tool;
+  return tool?.parameters ?? tool?.input_schema ?? tool?.function?.parameters ?? {};
+}
+
+function buildSpawnArgs(body, message) {
+  const schema = getToolSchema(body, "spawn_agent");
+  const properties = schema.properties ?? {};
+  const args = { message };
+  if (properties.fork_turns) args.fork_turns = "none";
+  else if (properties.fork_context) args.fork_context = false;
+  if (schema.required?.includes("task_name")) args.task_name = "claude_forwarder";
+  return args;
+}
+
+function buildWaitArgs(body, toolName, agentId) {
+  const properties = getToolSchema(body, toolName).properties ?? {};
+  const args = { timeout_ms: 1000 };
+  if (properties.targets) args.targets = [agentId];
+  else if (properties.ids) args.ids = [agentId];
+  return args;
+}
+
+function shellQuote(value) {
+  return "'" + value.replaceAll("'", "'\\''") + "'";
+}
+
 function startMockProvider({
   taskPrompt,
   userRequest,
@@ -797,17 +840,31 @@ function startMockProvider({
   notificationMessage = null,
   spawnMessage = null,
   childPromptChecks = "rescue",
+  forceYield = false,
 }) {
   const requests = [];
   const errors = [];
   const phases = [];
   const spawnCallId = "spawn-1";
-  const shellCallId = "shell-1";
-  const waitCallId = "wait-1";
-  const taskCommand =
-    taskCommandOverride ??
-    `node ${JSON.stringify(COMPANION_SCRIPT)} task --fresh ${JSON.stringify(taskPrompt)}`;
-  let childRenderedOutput = null;
+  const taskCommand = taskCommandOverride ??
+    `node ${shellQuote(COMPANION_SCRIPT)} task --fresh ${shellQuote(taskPrompt)}`;
+  const workerMessage = spawnMessage ??
+    "You are a transient forwarding worker for Claude Code rescue.\n" +
+    "Run exactly one shell command.\n" + WORKER_EXECUTION_CONTRACT +
+    "Return only that command's stdout text exactly. Ignore stderr progress chatter such as [cc] lines.\n" +
+    "Preserve only the final stdout-equivalent result text; do not trim, normalize, add punctuation, or add commentary.\n" +
+    "Do not inspect the repository, read files, grep, do the task directly, or reinterpret routing flags.\n" +
+    "Copy the resolved rescue task text byte-for-byte into the exact command below.\n" +
+    "Do not drop prefixes like completed: or strip a leading slash command.\n" +
+    "If the companion reports missing setup or auth, return that output unchanged.\n\n" + taskCommand;
+  const finalOutput = notificationMessage ?? expectedFinalOutput ?? computeExpectedChildOutput(taskPrompt);
+  let childProcessCallId = "shell-1";
+  let childStarted = false;
+  let childCompleted = false;
+  let parentStarted = false;
+  let agentId = null;
+  let sequence = 0;
+  let providerFailure = null;
 
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -816,310 +873,110 @@ function startMockProvider({
       const raw = Buffer.concat(chunks).toString("utf8");
       const body = raw ? JSON.parse(raw) : null;
       requests.push({ method: req.method, url: req.url, body });
-
       if (req.method === "GET" && req.url === "/v1/models") {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            object: "list",
-            data: [{ id: "mock-model", object: "model" }],
-          })
-        );
+        res.end(JSON.stringify({ object: "list", data: [{ id: "mock-model", object: "model" }] }));
         return;
       }
-
       if (req.method !== "POST" || req.url !== "/v1/responses") {
         res.writeHead(404);
         res.end("not found");
         return;
       }
-
       try {
-        const responseIndex = requests.filter(
-          (entry) => entry.method === "POST"
-        ).length;
+        sequence += 1;
+        if (providerFailure) throw new Error(providerFailure);
+        assert.ok(sequence <= 30, `mock delegation exceeded 30 requests; phases=${JSON.stringify(phases)}`);
+        const responseId = `resp-${sequence}`;
         const bodyText = JSON.stringify(body);
-        let events;
-
-        if (responseIndex === 1) {
-          phases.push("parent-init");
-          const serializedUserRequest = JSON.stringify(userRequest).slice(1, -1);
-          assert.ok(
-            bodyText.includes(skillTitle),
-            `${skillTitle} skill should be injected into the parent turn`
-          );
-          assert.ok(
-            bodyText.includes(userRequest) || bodyText.includes(serializedUserRequest),
-            "raw user prompt should reach the parent turn"
-          );
-          for (const needle of expectedParentNeedles) {
-            assert.ok(
-              bodyText.includes(needle),
-              `parent turn should include ${needle}`
-            );
-          }
-          assert.ok(
-            getToolNames(body).includes("spawn_agent"),
-            "spawn_agent should be available in the parent turn"
-          );
-          const spawnNamespace = getToolNamespace(body, "spawn_agent");
-          assert.equal(
-            spawnNamespace,
-            "multi_agent_v1",
-            "spawn_agent should be exposed under the multi_agent_v1 namespace"
-          );
-          if (mode === "builtin-alias") {
-            assert.ok(
-              bodyText.includes("--builtin-agent"),
-              "legacy built-in rescue alias should preserve the routing flag in the parent turn"
-            );
-          }
-          assert.ok(
-            bodyText.includes("inherits the parent model"),
-            "parent turn should instruct the forwarding child to inherit the parent model instead of pinning a Codex model"
-          );
-
-          const spawnArgs = {
-            reasoning_effort: "medium",
-            message:
-              spawnMessage ??
-              "You are a transient forwarding worker for Claude Code rescue.\n" +
-              "Run exactly one shell command.\n" +
-              "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
-              "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
-              "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
-              "Use sandbox_permissions: \"require_escalated\" with a justification that allows the Claude Code companion to contact the Claude API. Do not first try the companion command in the default network-disabled sandbox.\n" +
-              "Return only that command's stdout text exactly.\n" +
-              "Ignore stderr progress chatter such as [cc] lines.\n" +
-              "If the tool output includes both stderr progress and a final stdout-style result, preserve only the final stdout-equivalent result text.\n" +
-              "Do not trim, normalize, add punctuation, or add commentary.\n" +
-              "Do not drop prefixes like completed: or strip a leading slash command.\n" +
-              "Do not inspect the repository, read files, grep, or do the task directly.\n" +
-              "Do not reinterpret routing flags that were already resolved by the parent.\n" +
-              "If the companion reports missing setup or auth, return that output unchanged.\n" +
-              "Copy the resolved rescue task text byte-for-byte into the exact command below.\n" +
-              "Example exact output: completed:/simplify make the output compact\n\n" +
-              taskCommand,
-          };
-          events = [
-            eventCreated("resp-parent-1"),
-            eventFunctionCall(
-              spawnCallId,
-              "spawn_agent",
-              spawnArgs,
-              spawnNamespace
-            ),
-            eventCompleted("resp-parent-1"),
-          ];
-        } else if (responseIndex === 2) {
-          phases.push("child-shell");
-          assert.ok(
-            bodyText.includes(COMPANION_SCRIPT),
-            "spawned child turn should receive the companion path"
-          );
-          if (childPromptChecks === "rescue") {
-            assert.ok(
-              bodyText.includes("Run exactly one shell command") ||
-                bodyText.includes("Run exactly this command and return stdout unchanged"),
-              "spawned child turn should receive the forwarding contract"
-            );
-            assert.ok(
-              bodyText.includes("blocking foreground shell-tool call, not as a background terminal or session"),
-              "built-in child should be told not to launch a background terminal/session"
-            );
-            assert.ok(
-              bodyText.includes("Do not request a shell session id, poll a shell session later, or return before the command exits."),
-              "built-in child should be told not to return a shell session before the command exits"
-            );
-            assert.ok(
-              bodyText.includes("If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call."),
-              "built-in child should be told how to use exec_command without backgrounding"
-            );
-            assert.ok(
-              bodyText.includes("transient forwarding worker for Claude Code rescue"),
-              "built-in child should receive the stricter forwarding contract"
-            );
-            assert.ok(
-              bodyText.includes("Return only that command's stdout text exactly"),
-              "built-in child should be told to preserve stdout exactly"
-            );
-            assert.ok(
-              bodyText.includes("Ignore stderr progress chatter such as [cc] lines."),
-              "built-in child should be told to ignore stderr progress chatter"
-            );
-            assert.ok(
-              bodyText.includes("preserve only the final stdout-equivalent result text"),
-              "built-in child should be told to prefer the final stdout-equivalent result over stderr chatter"
-            );
-            assert.ok(
-              bodyText.includes("Do not drop prefixes like completed:"),
-              "built-in child should be told not to strip completed: prefixes"
-            );
-            assert.ok(
-              bodyText.includes("Do not trim, normalize, add punctuation, or add commentary."),
-              "built-in child should be told not to rewrite stdout"
-            );
-            assert.ok(
-              bodyText.includes("Copy the resolved rescue task text byte-for-byte"),
-              "built-in child should be told to preserve the exact task text in the command"
-            );
-          }
-          assert.ok(
-            bodyText.includes("sandbox_permissions") && bodyText.includes("require_escalated"),
-            "built-in child should request targeted escalation for Claude API access"
-          );
-          assert.ok(
-            bodyText.includes("contact the Claude API"),
-            "built-in child should receive a scoped network justification"
-          );
-          assert.ok(
-            bodyText.includes("Do not first try the companion command in the default network-disabled sandbox."),
-            "built-in child should avoid the known ENOTFOUND first attempt"
-          );
-          assert.doesNotMatch(
-            bodyText,
-            /claude-companion\.mjs"\s+task\s+--background|claude-companion\.mjs"\s+task\s+--wait|claude-companion\.mjs\s+task\s+--background|claude-companion\.mjs\s+task\s+--wait/,
-            "spawned child turn must not turn parent execution flags into companion task flags"
-          );
-          for (const needle of expectedChildNeedles) {
-            assert.ok(
-              bodyText.includes(needle),
-              `spawned child turn should include ${needle}`
-            );
-          }
-          const shellTool = chooseShellTool(body);
-          events = [
-            eventCreated("resp-child-1"),
-            eventFunctionCall(
-              shellCallId,
-              shellTool,
-              buildShellArgs(shellTool, taskCommand)
-            ),
-            eventCompleted("resp-child-1"),
-          ];
-        } else if (responseIndex === 3) {
-          phases.push("child-final");
-          childRenderedOutput =
-            notificationMessage ??
-            expectedFinalOutput ??
-            computeExpectedChildOutput(taskPrompt);
-          events = [
-            eventCreated("resp-child-2"),
-            eventAssistantMessage("msg-child-2", childRenderedOutput.trimEnd()),
-            eventCompleted("resp-child-2"),
-          ];
-        } else if (responseIndex === 4) {
-          const toolNames = getToolNames(body);
-          const hasNotification = bodyText.includes("<subagent_notification>");
-          if (toolNames.includes("wait_agent") || toolNames.includes("wait")) {
-            phases.push("parent-wait");
-            const waitTool = toolNames.includes("wait_agent")
-              ? "wait_agent"
-              : "wait";
-            const waitNamespace = getToolNamespace(body, waitTool);
-            assert.equal(
-              waitNamespace,
-              "multi_agent_v1",
-              `${waitTool} should be exposed under the multi_agent_v1 namespace`
-            );
-            const agentId = extractAgentIdFromSpawnOutput(body, spawnCallId);
-            assert.ok(
-              agentId,
-              "parent follow-up should receive the spawned agent id from spawn_agent"
-            );
-            events = [
-              eventCreated("resp-parent-2"),
-              eventFunctionCall(
-                waitCallId,
-                waitTool,
-                waitTool === "wait_agent"
-                  ? { targets: [agentId], timeout_ms: 1000 }
-                  : { ids: [agentId], timeout_ms: 1000 },
-                waitNamespace
-              ),
-              eventCompleted("resp-parent-2"),
-            ];
-          } else if (hasNotification) {
-            phases.push("parent-notification");
-            if (notificationMessage) {
-              assert.ok(
-                bodyText.includes(notificationMessage),
-                "parent notification follow-up should carry the steering message, not the raw child result"
-              );
-            }
-            events = [
-              eventCreated("resp-parent-2"),
-              eventAssistantMessage(
-                "msg-parent-2",
-                (notificationMessage ?? childRenderedOutput).trimEnd()
-              ),
-              eventCompleted("resp-parent-2"),
-            ];
-          } else {
-            throw new Error("parent follow-up should either expose a wait tool or include a subagent notification");
-          }
-        } else if (responseIndex === 5) {
-          phases.push("parent-final");
-          assert.ok(
-            typeof childRenderedOutput === "string" && childRenderedOutput.trim(),
-            "provider should have captured the child rendered output before the parent wait completes"
-          );
-          assert.ok(
-            bodyText.includes("<subagent_notification>"),
-            "parent post-wait turn should include the subagent completion notification"
-          );
-          const completedMessage = extractCompletedMessageFromWaitOutput(body, waitCallId);
-          const expectedCompletedMessage = (
-            notificationMessage ?? childRenderedOutput
-          ).trim();
-          assert.ok(
-            typeof completedMessage === "string" &&
-              completedMessage.trim() === expectedCompletedMessage,
-            "wait_agent output should expose the expected completion message"
-          );
-          events = [
-            eventCreated("resp-parent-3"),
-            eventAssistantMessage(
-              "msg-parent-3",
-              (notificationMessage ?? childRenderedOutput).trimEnd()
-            ),
-            eventCompleted("resp-parent-3"),
-          ];
-        } else {
-          throw new Error(`Unexpected POST /v1/responses call #${responseIndex}`);
-        }
-
-        res.writeHead(200, { "content-type": "text/event-stream" });
-        res.end(formatSse(events));
-      } catch (error) {
-        errors.push({
-          method: req.method,
-          url: req.url,
-          message: error instanceof Error ? error.message : String(error),
-          body,
+        // Parent and child requests may interleave. Identify the actor from its
+        // user message, never from a global request count.
+        const isParent = (body.input ?? []).some((item) => {
+          const content = typeof item.content === "string" ? item.content :
+            (item.content ?? []).map((part) => part.text ?? "").join("\n");
+          return item.role === "user" && content.includes(userRequest);
         });
-        res.writeHead(500, { "content-type": "text/plain" });
-        res.end(error instanceof Error ? error.stack || error.message : String(error));
+        let output;
+        if (isParent && !parentStarted) {
+          parentStarted = true;
+          phases.push("parent-init");
+          assert.ok(bodyText.includes(skillTitle), `${skillTitle} must reach the parent`);
+          for (const needle of expectedParentNeedles) {
+            assert.ok(bodyText.includes(needle), `parent turn should include ${needle}`);
+          }
+          assert.ok(findTool(body, "spawn_agent"), "parent must expose spawn_agent for this built-in-path test");
+          if (mode === "builtin-alias") assert.ok(bodyText.includes("--builtin-agent"));
+          output = eventFunctionCall(spawnCallId, "spawn_agent", buildSpawnArgs(body, workerMessage), getToolNamespace(body, "spawn_agent"));
+        } else if (isParent) {
+          agentId ??= extractAgentIdFromSpawnOutput(body, spawnCallId);
+          if (childCompleted) {
+            phases.push("parent-final");
+            output = eventAssistantMessage(`msg-${sequence}`, finalOutput.trimEnd());
+          } else {
+            phases.push("parent-wait");
+            const waitTool = findTool(body, "wait_agent") ? "wait_agent" : "wait";
+            assert.ok(findTool(body, waitTool), "foreground parent must have a wait tool");
+            assert.ok(agentId, "spawn result must identify the child to wait for");
+            output = eventFunctionCall(`wait-${sequence}`, waitTool, buildWaitArgs(body, waitTool, agentId), getToolNamespace(body, waitTool));
+          }
+        } else if (!childStarted) {
+          childStarted = true;
+          phases.push("child-shell");
+          assert.ok(bodyText.includes(COMPANION_SCRIPT), "child must receive the resolved companion path");
+          assert.ok(bodyText.includes("host's permitted execution defaults"), "child must honor host execution permissions");
+          assert.ok(bodyText.includes("never relaunch the command"), "child must continue the same yielded process");
+          if (childPromptChecks === "rescue") {
+            assert.ok(bodyText.includes("transient forwarding worker for Claude Code rescue"));
+            assert.ok(bodyText.includes("Copy the resolved rescue task text byte-for-byte"));
+          }
+          for (const needle of expectedChildNeedles) {
+            assert.ok(bodyText.includes(needle), `child turn should include ${needle}`);
+          }
+          assert.doesNotMatch(taskCommand, /claude-companion\.mjs["']?\s+task\s+--(?:background|wait)\b/);
+          const shellTool = chooseShellTool(body);
+          output = eventFunctionCall(childProcessCallId, shellTool, {
+            ...buildShellArgs(shellTool, taskCommand),
+            ...(forceYield && shellTool === "exec_command" ? { yield_time_ms: 1 } : {}),
+          }, getToolNamespace(body, shellTool));
+        } else {
+          const processOutput = extractOutputText(body, childProcessCallId) ?? "";
+          const runningSession = processOutput.match(/(?:Process running with session ID|session_id["\s:]*)\s*(\d+)/i)?.[1];
+          if (runningSession) {
+            phases.push("child-wait-process");
+            assert.ok(findTool(body, "write_stdin"), "yielded exec must expose write_stdin");
+            childProcessCallId = `process-wait-${sequence}`;
+            output = eventFunctionCall(childProcessCallId, "write_stdin", {
+              session_id: Number(runningSession), chars: "", yield_time_ms: 1000, max_output_tokens: 12000,
+            }, getToolNamespace(body, "write_stdin"));
+          } else {
+            assert.match(processOutput, /Process exited with code 0|"(?:exit_code|exitCode)"\s*:\s*0/, `companion must exit successfully before a result is returned: ${processOutput}`);
+            if (!notificationMessage) {
+              assert.ok(processOutput.includes(finalOutput.trim()), "final response must come from actual companion stdout");
+            }
+            childCompleted = true;
+            phases.push("child-final");
+            output = eventAssistantMessage(`msg-${sequence}`, finalOutput.trimEnd());
+          }
+        }
+        const events = [eventCreated(responseId), output, eventCompleted(responseId)];
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+        for (const event of events) res.write(`data: ${JSON.stringify(event)}\n\n`);
+        res.end("data: [DONE]\n\n");
+      } catch (error) {
+        providerFailure = error instanceof Error ? error.message : String(error);
+        if (errors.length === 0) errors.push({ message: providerFailure, phases: [...phases] });
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        for (const event of [eventCreated("resp-error"), eventAssistantMessage("msg-error", `MOCK_PROVIDER_ERROR: ${providerFailure}`), eventCompleted("resp-error")]) {
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        }
+        res.end("data: [DONE]\n\n");
       }
     });
   });
-
   return {
-    errors,
-    phases,
-    requests,
-    listen() {
-      return new Promise((resolve) => {
-        server.listen(0, "127.0.0.1", () => {
-          resolve(server.address().port);
-        });
-      });
-    },
-    close() {
-      return new Promise((resolve) => {
-        server.close(() => resolve());
-      });
-    },
+    errors, phases, requests,
+    listen() { return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port))); },
+    close() { return new Promise((resolve) => server.close(resolve)); },
   };
 }
 
@@ -1209,12 +1066,13 @@ describe("Codex rescue-skill E2E", () => {
     }
 
     const testEnv = createEnvironment();
-    const taskPrompt = "codex-rescue-e2e foreground delay=10";
+    const taskPrompt = "codex-rescue-e2e foreground delay=1000";
     const userRequest = "$cc:rescue --wait say hello from codex e2e";
     const provider = startMockProvider({
       taskPrompt,
       userRequest,
       mode: "builtin-default",
+      forceYield: true,
     });
     testEnv.providerPort = await provider.listen();
     installHooks(testEnv);
@@ -1251,24 +1109,19 @@ describe("Codex rescue-skill E2E", () => {
 
       const claudeInvocations = readClaudeInvocations(testEnv.claudeLogFile);
       assert.ok(
-        claudeInvocations.length >= 1,
-        "fake Claude CLI should be invoked at least once"
+        claudeInvocations.length === 1,
+        `expected exactly one Claude process; calls=${claudeInvocations.length}; phases=${JSON.stringify(provider.phases)}`
       );
       assert.ok(
         claudeInvocations.some((entry) => entry.prompt === taskPrompt),
         `expected fake Claude invocation for prompt ${taskPrompt}`
       );
 
-      const acceptedPhaseSequences = [
-        ["parent-init", "child-shell", "child-final"],
-        ["parent-init", "child-shell", "child-final", "parent-wait", "parent-final"],
-      ];
-      assert.ok(
-        acceptedPhaseSequences.some(
-          (sequence) => JSON.stringify(sequence) === JSON.stringify(provider.phases)
-        ),
-        `expected the built-in rescue wait flow to use either the direct child-completion path or the explicit wait-follow-up path, saw ${JSON.stringify(provider.phases)}`
-      );
+      assert.equal(provider.phases.filter((phase) => phase === "child-shell").length, 1);
+      assert.ok(provider.phases.includes("child-wait-process"), "forced yield must exercise process continuation");
+      assert.ok(provider.phases.includes("child-final"));
+      assert.ok(provider.phases.indexOf("child-final") < provider.phases.indexOf("parent-final"));
+
     } finally {
       await provider.close();
       cleanupEnvironment(testEnv);
@@ -1340,7 +1193,7 @@ describe("Codex rescue-skill E2E", () => {
     }
 
     const testEnv = createEnvironment();
-    const reservedJobId = "task-background-steer-123";
+    const reservedJobId = reserveJob(testEnv, "task");
     const taskPrompt = "codex-rescue-e2e background-notify delay=10";
     const userRequest = "$cc:rescue --background say hello from codex e2e in background";
     const notificationMessage = `Background Claude Code rescue finished. Open it with $cc:result ${reservedJobId}.`;
@@ -1349,13 +1202,9 @@ describe("Codex rescue-skill E2E", () => {
       userRequest,
       mode: "builtin-default",
       taskCommand:
-        `node ${JSON.stringify(COMPANION_SCRIPT)} task --fresh --job-id ${JSON.stringify(reservedJobId)} --view-state defer ${JSON.stringify(taskPrompt)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} task --fresh --cwd ${JSON.stringify(PROJECT_ROOT)} --job-id ${JSON.stringify(reservedJobId)} --view-state defer ${JSON.stringify(taskPrompt)}`,
       expectedChildNeedles: ["--view-state defer", "--job-id", reservedJobId],
-      expectedParentNeedles: [
-        "blocking foreground shell-tool call, not as a background terminal/session",
-        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
-        "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
-      ],
+      expectedParentNeedles: ["shared host execution contract"],
       notificationMessage,
     });
     testEnv.providerPort = await provider.listen();
@@ -1784,7 +1633,7 @@ describe("Codex direct-skill E2E", () => {
       "utf8"
     );
 
-    const reservedJobId = "review-background-steer-123";
+    const reservedJobId = reserveJob(testEnv, "review", workspaceDir);
     const ownerSessionId = "parent-review-session";
     const userRequest = "$cc:review --background --scope working-tree --model haiku";
     const notificationMessage =
@@ -1797,23 +1646,16 @@ describe("Codex direct-skill E2E", () => {
         "background-routing-context --kind review --json",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background review by running the companion command itself with shell backgrounding",
-        "blocking foreground shell-tool call, not as a background terminal/session",
-        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
-        "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
-        "allow one extra `send_input` call after a successful shell result",
-        "must target the provided parent thread id",
-        "do not silently drop the completion notification path from the child prompt",
         "Background Claude Code review finished. Open it with $cc:result <reserved-job-id>.",
       ],
       taskCommand:
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --cwd ${JSON.stringify(workspaceDir)} --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
       expectedChildNeedles: [
         "--view-state defer",
         "--job-id",
         reservedJobId,
         "--owner-session-id",
         ownerSessionId,
-        "send_input",
         notificationMessage,
       ],
       notificationMessage,
@@ -1822,15 +1664,12 @@ describe("Codex direct-skill E2E", () => {
         "You are a pure forwarder for a background Claude Code review job.\n" +
         "Do not inspect the repo, do not review anything yourself, and do not add commentary.\n" +
         "Run exactly one shell command and capture only the stdout-equivalent final result text from that command, ignoring stderr progress chatter like [cc] lines.\n" +
-        "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
-        "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
-        "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
-        "Use sandbox_permissions: \"require_escalated\" with the justification Allow the Claude Code companion to contact the Claude API for this requested review. Do not first try the companion command in the default network-disabled sandbox.\n" +
-        "If the command succeeds and a parent thread id is available, send exactly this notification to the parent thread before finishing: " +
+              WORKER_EXECUTION_CONTRACT +
+        "If the command succeeds, let native completion delivery carry this final steering message: " +
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
         "If the command fails, return only the command stdout if any, otherwise a terse failure note.\n\n" +
-        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state defer --scope working-tree --model haiku --cwd ${JSON.stringify(workspaceDir)} --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)}`,
     });
     testEnv.providerPort = await provider.listen();
     installHooks(testEnv);
@@ -1996,7 +1835,7 @@ describe("Codex direct-skill E2E", () => {
       "utf8"
     );
 
-    const reservedJobId = "adversarial-background-steer-123";
+    const reservedJobId = reserveJob(testEnv, "review", workspaceDir);
     const ownerSessionId = "parent-adversarial-session";
     const userRequest =
       "$cc:adversarial-review --background --scope working-tree --model haiku focus on race conditions";
@@ -2010,23 +1849,16 @@ describe("Codex direct-skill E2E", () => {
         "background-routing-context --kind review --json",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background adversarial review by running the companion command itself with shell backgrounding",
-        "blocking foreground shell-tool call, not as a background terminal/session",
-        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
-        "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
-        "allow one extra `send_input` call after a successful shell result",
-        "must target the provided parent thread id",
-        "do not silently drop the completion notification path from the child prompt",
         "Background Claude Code adversarial review finished. Open it with $cc:result <reserved-job-id>.",
       ],
       taskCommand:
-        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} focus on race conditions`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state defer --scope working-tree --model haiku --cwd ${JSON.stringify(workspaceDir)} --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} focus on race conditions`,
       expectedChildNeedles: [
         "--view-state defer",
         "--job-id",
         reservedJobId,
         "--owner-session-id",
         ownerSessionId,
-        "send_input",
         notificationMessage,
         "focus on race conditions",
       ],
@@ -2036,15 +1868,12 @@ describe("Codex direct-skill E2E", () => {
         "You are a pure forwarder for a background Claude Code adversarial review job.\n" +
         "Do not inspect the repo, do not review anything yourself, and do not add commentary.\n" +
         "Run exactly one shell command and capture only the stdout-equivalent final result text from that command, ignoring stderr progress chatter like [cc] lines.\n" +
-        "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
-        "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
-        "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
-        "Use sandbox_permissions: \"require_escalated\" with the justification Allow the Claude Code companion to contact the Claude API for this requested review. Do not first try the companion command in the default network-disabled sandbox.\n" +
-        "If the command succeeds and a parent thread id is available, send exactly this notification to the parent thread before finishing: " +
+              WORKER_EXECUTION_CONTRACT +
+        "If the command succeeds, let native completion delivery carry this final steering message: " +
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
         "If the command fails, return only the command stdout if any, otherwise a terse failure note.\n\n" +
-        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state defer --scope working-tree --model haiku --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} focus on race conditions`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} adversarial-review --view-state defer --scope working-tree --model haiku --cwd ${JSON.stringify(workspaceDir)} --job-id ${JSON.stringify(reservedJobId)} --owner-session-id ${JSON.stringify(ownerSessionId)} focus on race conditions`,
     });
     testEnv.providerPort = await provider.listen();
     installHooks(testEnv);
@@ -2347,5 +2176,33 @@ describe("native hook dispatch", () => {
       await provider.close();
       cleanupEnvironment(testEnv);
     }
+  });
+});
+
+
+describe("mock-provider host schema adaptation", () => {
+  it("uses app task_name/fork_turns and inherits model and effort", () => {
+    const body = { tools: [{ type: "namespace", name: "collaboration", tools: [{
+      name: "spawn_agent", parameters: { required: ["task_name", "message"], properties: {
+        task_name: { type: "string" }, message: { type: "string" }, fork_turns: { type: "string" },
+      } },
+    }] }] };
+    assert.deepEqual(buildSpawnArgs(body, "forward"), {
+      message: "forward", task_name: "claude_forwarder", fork_turns: "none",
+    });
+    assert.equal(getToolNamespace(body, "spawn_agent"), "collaboration");
+  });
+
+  it("uses CLI fork_context only when advertised", () => {
+    const body = { tools: [{ name: "spawn_agent", parameters: { properties: {
+      message: { type: "string" }, fork_context: { type: "boolean" },
+    } } }] };
+    assert.deepEqual(buildSpawnArgs(body, "forward"), { message: "forward", fork_context: false });
+    assert.deepEqual(buildSpawnArgs({ tools: [{ name: "spawn_agent" }] }, "forward"), { message: "forward" });
+  });
+
+  it("does not send CLI wait targets to an app mailbox wait", () => {
+    const body = { tools: [{ name: "wait_agent", parameters: { properties: { timeout_ms: {} } } }] };
+    assert.deepEqual(buildWaitArgs(body, "wait_agent", "synthetic-agent"), { timeout_ms: 1000 });
   });
 });

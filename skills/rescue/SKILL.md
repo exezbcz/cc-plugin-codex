@@ -1,13 +1,15 @@
 ---
 name: rescue
-description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model <model>, --effort <low|medium|high|xhigh|max>, --prompt-file <path>, [task text]. Defaults to opus with no forced effort. Use when Claude should investigate or change things, not when the user only wants review findings.'
+description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model model, --effort low|medium|high|xhigh|max, --prompt-file path, [task text]. Defaults to opus with no forced effort. Use when Claude should investigate or change things, not when the user only wants review findings.'
 ---
+
+<!-- Modified for Codex app and CLI host compatibility. -->
 
 # Claude Code Rescue
 
 By default, hand this skill off through Codex's built-in `default` subagent.
-Do not answer the request inline in the main Codex thread.
-Spawn exactly one rescue forwarding subagent whose only job is to run one companion `task` command and return that stdout unchanged.
+When a built-in agent is available, do not answer the request inline in the main Codex thread. With no supported agent, use the foreground companion fallback in the shared host contract.
+When an agent is available, spawn exactly one rescue forwarding subagent whose only job is to run one companion `task` command and return that stdout unchanged.
 Foreground rescue responses must be that subagent's output verbatim.
 
 Use this skill when the user wants Claude Code to investigate, implement, or continue substantial work in this repository.
@@ -19,6 +21,8 @@ Do not use rescue merely because the main Codex thread plans to fix things after
 Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always run the companion from that active plugin root:
 `node "<plugin-root>/scripts/claude-companion.mjs" task ...`
 
+Before executing, read the [shared host execution contract](../../internal-skills/host-runtime/runtime.md). It defines schema-aware agent routing, waiting on a yielded process, execution permissions, and completion delivery for the Codex app and CLI. If no built-in agent is available, run the companion in the parent in the foreground as described there.
+
 Raw slash-command arguments:
 `$ARGUMENTS`
 
@@ -29,7 +33,7 @@ Companion defaults: model=opus, and no effort. The companion forwards `--effort`
 Forward `--model` unchanged to the companion. The companion trims surrounding whitespace, canonicalizes the friendly aliases `fable`, `opus`, `sonnet`, and `haiku` to lowercase, then forwards every other `--model` value unchanged to Claude Code. Claude Code owns alias resolution and supported effort levels; `/model` is the authoritative picker for the current account and provider.
 
 Main-thread routing rules:
-- If the user explicitly invoked `$cc:rescue` or `Claude Code Rescue`, do not keep the work in the main Codex thread. Delegate it.
+- If the user explicitly invoked `$cc:rescue` or `Claude Code Rescue`, delegate execution to Claude through the companion; use a forwarding agent when available, otherwise the foreground fallback.
 - If the user did not supply a task, ask what Claude Code should investigate or fix.
 - Treat `--background` and `--wait` as execution controls, not task text.
 - `--background` and `--wait` are Codex-side execution controls only. Never forward either flag to `claude-companion.mjs task`.
@@ -57,16 +61,12 @@ Main-thread routing rules:
 - If the user chooses a new thread, add `--fresh` before spawning the subagent.
 - If the helper reports `available: false`, do not ask. Delegate normally.
 - Do not inspect the repo, do the task yourself, poll job status, or summarize the result in the same turn.
-- If a legacy request still includes `--notify-parent-on-complete`, treat it as a compatibility alias. Background built-in rescue now attempts parent wake-up by default.
+- If a legacy request still includes `--notify-parent-on-complete`, treat it as a compatibility alias. Background completion follows the host's supported delivery mechanism.
 
 Subagent launch:
-- By default, use Codex's `spawn_agent` tool. Omit `agent_type`; an omitted `agent_type` already selects the built-in default agent, and Codex only advertises that parameter when custom agents are configured.
+- By default, use the available `spawn_agent` tool with the shared host contract. The worker inherits the parent model and host defaults unless the user requests a supported Codex worker override.
 - Never satisfy background rescue by launching `claude-companion.mjs task` itself as a detached shell process. Do not use `&`, `nohup`, detached `spawn`, or any equivalent direct background process launch from the parent.
 - If a legacy request still includes `--builtin-agent`, treat it as a compatibility alias for the default built-in path. It should not change behavior.
-- Prefer `fork_context: false` for the built-in rescue child. The parent should pass a self-contained forwarding message instead of replaying the full parent thread by default.
-- Only consider `fork_context: true` as a last resort for a short follow-up where essential context truly cannot be summarized. Avoid it for large or long-lived threads because it can exhaust the child context window.
-- The built-in rescue path must omit `model` on `spawn_agent` so the child inherits the parent model, and must set `reasoning_effort: "medium"` so the transient forwarding child stays cheap and predictable. Never pin a specific Codex model name here; the available catalog is owned by the host CLI and changes between releases.
-- Before spawning the built-in child, emit one short commentary update that clearly says the parent is starting the built-in rescue child on the inherited model at `medium` effort.
 - Remove `--background` and `--wait` before spawning the subagent. Those flags control only whether the main thread waits on the subagent.
 - Pass only the routing and task arguments that actually belong to `claude-companion.mjs task`.
 - If the free-text task begins with `/`, preserve it verbatim in the spawned subagent request. Do not strip the slash or rewrite it into a local Codex command.
@@ -82,7 +82,7 @@ Subagent launch:
 - Any user-supplied `--model` flag is for the Claude companion only and must be forwarded unchanged to `task`.
 - If that helper returns a non-empty `parentThreadId`, pass it into the child prompt as the parent thread id for one-shot completion notification.
 - If it returns an empty `parentThreadId`, continue without parent wake-up instead of blocking the rescue.
-- This parent wake-up attempt is now the default for background built-in rescue on persistent Codex/Desktop threads. It is still best-effort and should silently degrade on one-shot `codex exec` runs.
+- Completion delivery is best-effort: use the host's automatic notification or a compatible messaging tool when available, otherwise rely on the child final message and stored result.
 - For the built-in rescue path, the parent thread owns prompt shaping. The built-in child should stay a pure executor.
 - For the built-in rescue path, treat the internal runtime reference at `../../internal-skills/cli-runtime/runtime.md` as the command-building contract for the forwarding worker. It is an internal reference document, not a public skill to invoke.
 - If the built-in rescue request is vague, chatty, or a follow-up, the parent may tighten only the task text before composing the exact companion command.
@@ -119,21 +119,12 @@ Subagent launch:
 - Prefer a temporary path outside the repository checkout, for example under the OS temp directory such as `/tmp` on POSIX systems, so rescue prompt staging does not dirty the repo.
 - Materialize that prompt file with a normal file-write tool or other structured write path. Do not try to generate it by re-embedding the long task text inside another fragile one-line shell string.
 - If the user is not satisfied with a built-in rescue result, the parent should treat the next rescue request as a follow-up and prefer `--resume` or `--resume-last` with a short delta instruction when a resumable Claude Code session exists.
+- Follow the host execution contract for agent creation, process yields, permissions, and completion delivery. Include its applicable rules in the child message.
 - The built-in rescue path must use a compact strict forwarding message. It must:
   - identify the child as a transient forwarding worker for Claude Code rescue
   - include exactly one shell command to run
-  - run that command as one blocking foreground shell-tool call, not as a background terminal/session
-  - do not request a shell session id, poll a shell session later, or return before the companion command exits
-  - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
-  - when using `exec_command`, pass `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested task.` on that one call; do not first try the companion command in the default network-disabled sandbox
   - for foreground rescue only, tell the child to return that command's stdout text exactly, with no preamble, summary, code fence, trimming, normalization, or punctuation changes
   - tell the child to ignore stderr progress chatter such as `[cc] ...` lines and preserve only the stdout-equivalent final result text
-  - if a parent thread id is provided for experimental background notification, allow one extra `send_input` call after a successful shell result and before finishing
-  - the child prompt must mention the tool name `send_input` literally; do not replace it with a vague instruction like "send a message to the parent"
-  - that `send_input` call must target the provided parent thread id, must happen at most once, and must not run on failure paths
-  - that `send_input` call should use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })` with no extra prose payload
-  - if the parent provided a non-empty parent thread id, do not silently drop the completion notification path from the child prompt
-  - that `send_input` message should use a short user-facing template that steers the parent toward explicit result retrieval instead of inlining the raw result
   - if a reserved companion job id is available, use this exact high-level shape for the notification message:
     `Background Claude Code rescue finished. Open it with $cc:result <reserved-job-id>.`
   - if no reserved job id is available, fall back to:
@@ -153,9 +144,9 @@ Subagent launch:
 Execution:
 - Foreground: spawn the rescue subagent, wait for it to finish, and return its stdout.
 - Background: spawn the rescue subagent without waiting for it in this turn. The subagent still runs the companion `task` command in the foreground inside its own thread. Background here describes only the parent thread's wait behavior.
-- Default background notify: when the parent thread id was captured successfully, the background built-in child may wake the parent with one synthetic follow-up turn after success.
+- Background completion: use automatic host delivery or a compatible messaging tool after success; a parent thread id alone does not guarantee wake-up support.
 
 Output:
 - Foreground: return the subagent's companion stdout exactly as-is. Do not paraphrase, summarize, or add commentary before or after it.
-- Background: do not wait for the subagent output. After launching it, tell the user `Claude Code rescue started in the background. Check the subagent session or $cc:status for progress, and once it's done, we will let you know to see the results.`
+- Background: do not wait for the subagent output. After launching it, tell the user `Claude Code rescue started in the background. Check the subagent session or $cc:status for progress, then open the completed job with $cc:result.`
 - If the companion reports missing setup or authentication, direct the user to `$cc:setup`.

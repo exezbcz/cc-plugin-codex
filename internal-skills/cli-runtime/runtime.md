@@ -1,8 +1,12 @@
+<!-- Modified for Codex app and CLI host compatibility. -->
+
 # Claude Code Rescue Runtime Reference
 
-Use this document only inside the rescue forwarding worker spawned by `$cc:rescue` as defined in `../../skills/rescue/SKILL.md`.
+Use this document inside the rescue forwarding worker spawned by `$cc:rescue`, or in the parent when the host has no built-in agent, as defined in `../../skills/rescue/SKILL.md`.
 This is an internal execution contract, not a public skill. It owns execution and routing. It does not own prompt rewriting beyond deciding when to consult the prompt-shaping reference.
 The public rescue skill already resolved the active plugin root from its `SKILL.md` path. Reuse that path here. Do not derive a new runtime path from this document or the current working tree.
+
+Before executing, read the [shared host execution contract](../host-runtime/runtime.md). It defines schema-aware agent routing, waiting on a yielded process, execution permissions, and completion delivery for the Codex app and CLI. If no built-in agent is available, run the companion in the parent in the foreground as described there.
 
 Primary helper:
 - `node "<plugin-root>/scripts/claude-companion.mjs" task ...`
@@ -11,8 +15,7 @@ Execution rules:
 - The rescue subagent is a forwarder, not an operator. Launch exactly one `task` command and return that stdout unchanged.
 - Prefer the helper over hand-rolled Bash, direct Claude Code CLI strings, or any other orchestration path.
 - Never call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel` from the rescue forwarder.
-- You may consult `../task-prompt-shaping/prompt-shaping.md` to rewrite the user's request into a tighter Claude Code prompt before the single `task` call.
-- That prompt shaping is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis.
+- The parent owns prompt shaping through `../task-prompt-shaping/prompt-shaping.md`. Preserve its resolved command; the worker must not rewrite the task, inspect the repo, solve the task itself, or add independent analysis.
 
 Command selection:
 - Treat `--background` and `--wait` as execution controls.
@@ -36,7 +39,7 @@ Routing controls:
 - If the forwarded request includes `--resume` or `--resume-last`, continue the latest tracked Claude Code task.
 - If the forwarded request includes `--fresh`, start a new task.
 - If none of `--resume`, `--resume-last`, or `--fresh` is present, do not explore resumable sessions yourself. The parent rescue skill already owns that choice.
-- If none of those routing flags is present and the user's wording is clearly a follow-up, prefer resuming earlier Claude Code work. Otherwise start fresh.
+- If the parent supplied no explicit continuation flag, preserve that choice and let the companion apply its defaults.
 - Never call `task-resume-candidate` from the rescue forwarder.
 
 Task defaults:
@@ -47,14 +50,7 @@ Task defaults:
 - Use a structured file-write path to create that prompt file when possible. Do not solve shell quoting by wrapping the same long task inside another brittle inline shell command.
 - If the tool output includes stderr progress chatter and a final stdout-style result, ignore the progress chatter and preserve only the final stdout-equivalent result text.
 - Return the stdout of the `task` command exactly as-is.
-- Run the companion command as one blocking foreground shell-tool call, not as a background terminal/session.
-- Do not request a shell session id, poll a shell session later, or return before the companion command exits.
-- If the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call.
-- When using `exec_command`, pass `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested task.` on that one call. Do not first try the companion command in the default network-disabled sandbox.
-- If the parent supplied a non-empty parent thread id for background completion, allow at most one success-only `send_input` notification before finishing.
-- Mention the tool name `send_input` literally when describing that notification path.
-- Use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`.
 - Use steering messages that point the parent at `$cc:result` or `$cc:status` instead of embedding the raw Claude result.
 - For background rescue, use that same steering message as the child's own final assistant message instead of echoing the raw companion result.
 - Do not poll status, fetch results, cancel jobs, or add commentary after the companion output.
-- If the companion reports missing setup or authentication, tell the user to run `$cc:setup`.
+- If the companion reports missing setup or authentication, return its output unchanged; the parent can direct the user to `$cc:setup`.

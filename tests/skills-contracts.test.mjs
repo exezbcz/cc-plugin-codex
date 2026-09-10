@@ -1,6 +1,7 @@
 /**
  * Copyright 2026 Sendbird, Inc.
  * SPDX-License-Identifier: Apache-2.0
+ * Modified to check portable host execution contracts.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -18,7 +19,6 @@ function read(relativePath) {
 
 test("public model contracts document native Fable support and host-owned effort defaults", () => {
   const contracts = [
-    "README.md",
     "skills/review/SKILL.md",
     "skills/adversarial-review/SKILL.md",
     "skills/rescue/SKILL.md",
@@ -47,7 +47,6 @@ test("public model contracts document native Fable support and host-owned effort
 
 test("model contracts delegate discovery and alias resolution to Claude Code", () => {
   const contracts = [
-    "README.md",
     "skills/review/SKILL.md",
     "skills/adversarial-review/SKILL.md",
     "skills/rescue/SKILL.md",
@@ -69,7 +68,7 @@ test("model contracts delegate discovery and alias resolution to Claude Code", (
     );
   }
 
-  for (const contractPath of contracts.filter((contractPath) => contractPath !== "README.md")) {
+  for (const contractPath of contracts) {
     const contract = read(contractPath);
     assert.match(
       contract,
@@ -118,15 +117,6 @@ test("internal runtime references keep the active-root and notification invarian
   assert.match(reviewRuntime, activeRootPattern);
   assert.match(reviewRuntime, /Do not derive a new runtime path from this document or the current working tree/i);
   assert.match(reviewRuntime, /Never emit an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
-  assert.match(reviewRuntime, /blocking foreground shell-tool call, not as a background terminal\/session/i);
-  assert.match(reviewRuntime, /Do not request a shell session id, poll a shell session later, or return before the companion command exits/i);
-  assert.match(reviewRuntime, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
-  assert.match(reviewRuntime, /`sandbox_permissions: "require_escalated"`/i);
-  assert.match(reviewRuntime, /contact the Claude API for this requested review/i);
-  assert.match(reviewRuntime, /Do not first try the companion command in the default network-disabled sandbox/i);
-  assert.match(reviewRuntime, /mention the tool name `send_input` literally/i);
-  assert.match(reviewRuntime, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
-  assert.match(reviewRuntime, /do not silently drop the completion notification path when the parent provided a non-empty parent thread id/i);
   assert.match(reviewRuntime, /Use that same steering message as the child's own final assistant message for background mode/i);
 
   assert.match(rescueRuntime, /resolved the active plugin root/i);
@@ -135,15 +125,6 @@ test("internal runtime references keep the active-root and notification invarian
   assert.match(rescueRuntime, /Never emit an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
   assert.match(rescueRuntime, /Do not add `--quiet-progress` by default/i);
   assert.match(rescueRuntime, /slash command as literal Claude Code task text/i);
-  assert.match(rescueRuntime, /blocking foreground shell-tool call, not as a background terminal\/session/i);
-  assert.match(rescueRuntime, /Do not request a shell session id, poll a shell session later, or return before the companion command exits/i);
-  assert.match(rescueRuntime, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
-  assert.match(rescueRuntime, /`sandbox_permissions: "require_escalated"`/i);
-  assert.match(rescueRuntime, /contact the Claude API for this requested task/i);
-  assert.match(rescueRuntime, /Do not first try the companion command in the default network-disabled sandbox/i);
-  assert.match(rescueRuntime, /allow at most one success-only `send_input` notification before finishing/i);
-  assert.match(rescueRuntime, /Mention the tool name `send_input` literally/i);
-  assert.match(rescueRuntime, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
   assert.match(rescueRuntime, /Use steering messages that point the parent at `\$cc:result` or `\$cc:status` instead of embedding the raw Claude result/i);
   assert.match(rescueRuntime, /use that same steering message as the child's own final assistant message instead of echoing the raw companion result/i);
 });
@@ -180,33 +161,17 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(review, /non-empty `ownerSessionId`/i);
   assert.match(review, /omit `--owner-session-id` entirely/i);
   assert.match(review, /spawn_agent/i);
-  assert.match(review, /`fork_context: false`/i);
-  assert.match(review, /`reasoning_effort: "medium"`/i);
-  assert.match(review, /no `agent_type` and no `model`, so the child uses the built-in default agent and inherits the parent model/i);
   assert.doesNotMatch(review, /gpt-5/i);
   assert.match(review, /Prefer a self-contained child message over inheriting parent history/i);
-  assert.match(review, /Only consider `fork_context: true` as a last resort/i);
   assert.match(review, /review --view-state defer/i);
   assert.match(review, /include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id/i);
   assert.match(review, /never leave an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
-  assert.match(review, /blocking foreground shell-tool call, not as a background terminal\/session/i);
-  assert.match(review, /Do not request a shell session id, poll a shell session later, or return before the companion command exits/i);
-  assert.match(review, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
-  assert.match(review, /`sandbox_permissions: "require_escalated"`/i);
-  assert.match(review, /contact the Claude API for this requested review/i);
-  assert.match(review, /do not first try the companion command in the default network-disabled sandbox/i);
-  assert.match(review, /allow one extra `send_input` call after a successful shell result/i);
-  assert.match(review, /must mention the tool name `send_input` literally/i);
-  assert.match(review, /must target the provided parent thread id/i);
-  assert.match(review, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
-  assert.match(review, /do not silently drop the completion notification path from the child prompt/i);
   assert.match(review, /Background Claude Code review finished\. Open it with \$cc:result <reserved-job-id>\./i);
-  assert.match(review, /that `send_input` message should use one of those exact steering messages/i);
   assert.match(review, /use these steering messages instead of embedding the raw review result in the notification/i);
   assert.match(review, /do not embed the raw Claude result inside the notification message/i);
   assert.match(review, /do not include any other prose in that notification message/i);
   assert.match(review, /use that same steering message as the child's own final assistant message instead of echoing the raw review result/i);
-  assert.match(review, /Check the subagent session or \$cc:status for progress, and once it's done, we will let you know to see the results\./i);
+  assert.match(review, /Check the subagent session or \$cc:status for progress, then open the completed job with \$cc:result\./i);
   assert.doesNotMatch(review, /claude-companion\.mjs" review --background/i);
   assert.doesNotMatch(review, /claude-companion\.mjs" review \$ARGUMENTS/i);
 
@@ -237,33 +202,17 @@ test("review skills keep background execution outside the companion command", ()
   assert.match(adversarial, /non-empty `ownerSessionId`/i);
   assert.match(adversarial, /omit `--owner-session-id` entirely/i);
   assert.match(adversarial, /spawn_agent/i);
-  assert.match(adversarial, /`fork_context: false`/i);
-  assert.match(adversarial, /`reasoning_effort: "medium"`/i);
-  assert.match(adversarial, /no `agent_type` and no `model`, so the child uses the built-in default agent and inherits the parent model/i);
   assert.doesNotMatch(adversarial, /gpt-5/i);
   assert.match(adversarial, /Prefer a self-contained child message over inheriting parent history/i);
-  assert.match(adversarial, /Only consider `fork_context: true` as a last resort/i);
   assert.match(adversarial, /adversarial-review --view-state defer/i);
   assert.match(adversarial, /include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id/i);
   assert.match(adversarial, /never leave an empty routing placeholder such as `--owner-session-id {2}--job-id`/i);
-  assert.match(adversarial, /blocking foreground shell-tool call, not as a background terminal\/session/i);
-  assert.match(adversarial, /Do not request a shell session id, poll a shell session later, or return before the companion command exits/i);
-  assert.match(adversarial, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
-  assert.match(adversarial, /`sandbox_permissions: "require_escalated"`/i);
-  assert.match(adversarial, /contact the Claude API for this requested review/i);
-  assert.match(adversarial, /do not first try the companion command in the default network-disabled sandbox/i);
-  assert.match(adversarial, /allow one extra `send_input` call after a successful shell result/i);
-  assert.match(adversarial, /must mention the tool name `send_input` literally/i);
-  assert.match(adversarial, /must target the provided parent thread id/i);
-  assert.match(adversarial, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
-  assert.match(adversarial, /do not silently drop the completion notification path from the child prompt/i);
   assert.match(adversarial, /Background Claude Code adversarial review finished\. Open it with \$cc:result <reserved-job-id>\./i);
-  assert.match(adversarial, /that `send_input` message should use one of those exact steering messages/i);
   assert.match(adversarial, /use these steering messages instead of embedding the raw review result in the notification/i);
   assert.match(adversarial, /do not embed the raw Claude result inside the notification message/i);
   assert.match(adversarial, /do not include any other prose in that notification message/i);
   assert.match(adversarial, /use that same steering message as the child's own final assistant message instead of echoing the raw review result/i);
-  assert.match(adversarial, /Check the subagent session or \$cc:status for progress, and once it's done, we will let you know to see the results\./i);
+  assert.match(adversarial, /Check the subagent session or \$cc:status for progress, then open the completed job with \$cc:result\./i);
   assert.doesNotMatch(adversarial, /claude-companion\.mjs" adversarial-review --background/i);
   assert.doesNotMatch(adversarial, /claude-companion\.mjs" adversarial-review \$ARGUMENTS/i);
 });
@@ -296,7 +245,7 @@ test("rescue skill keeps --background and --wait as host-side controls only", ()
   assert.match(rescue, /Background rescue must add `--view-state defer`/i);
   assert.match(rescue, /Background: spawn the rescue subagent without waiting for it in this turn/i);
   assert.match(rescue, /The subagent still runs the companion `task` command in the foreground/i);
-  assert.match(rescue, /tell the user `Claude Code rescue started in the background\. Check the subagent session or \$cc:status for progress, and once it's done, we will let you know to see the results\.`/i);
+  assert.match(rescue, /tell the user `Claude Code rescue started in the background\. Check the subagent session or \$cc:status for progress, then open the completed job with \$cc:result\.`/i);
 });
 
 test("rescue skill documents the experimental built-in-agent forwarding path", () => {
@@ -318,36 +267,16 @@ test("rescue skill documents the experimental built-in-agent forwarding path", (
   assert.match(rescue, /legacy request still includes `--builtin-agent`/i);
   assert.match(rescue, /legacy request still includes `--notify-parent-on-complete`/i);
   assert.match(rescue, /compatibility alias for the default built-in path/i);
-  assert.match(rescue, /Prefer `fork_context: false` for the built-in rescue child/i);
-  assert.match(rescue, /Only consider `fork_context: true` as a last resort/i);
-  assert.match(rescue, /must omit `model` on `spawn_agent` so the child inherits the parent model, and must set `reasoning_effort: "medium"`/i);
-  assert.match(rescue, /Omit `agent_type`/i);
-  assert.match(rescue, /starting the built-in rescue child on the inherited model at `medium` effort/i);
   assert.doesNotMatch(rescue, /gpt-5/i);
   assert.match(rescue, /non-empty `parentThreadId`/i);
   assert.match(rescue, /pass it into the child prompt as the parent thread id/i);
-  assert.match(rescue, /allow one extra `send_input` call after a successful shell result/i);
-  assert.match(rescue, /must mention the tool name `send_input` literally/i);
-  assert.match(rescue, /must target the provided parent thread id/i);
-  assert.match(rescue, /exact tool shape `send_input\(\{ target: <parent-thread-id>, message: <steering-message> \}\)`/i);
-  assert.match(rescue, /do not silently drop the completion notification path from the child prompt/i);
-  assert.match(rescue, /short user-facing template that steers the parent toward explicit result retrieval instead of inlining the raw result/i);
   assert.match(rescue, /Background Claude Code rescue finished\. Open it with \$cc:result <reserved-job-id>\./i);
   assert.match(rescue, /fall back to:/i);
   assert.match(rescue, /Background Claude Code rescue finished\. Inspect it with \$cc:status first, then use \$cc:result for the finished job you want to open\./i);
-  assert.match(rescue, /blocking foreground shell-tool call, not as a background terminal\/session/i);
-  assert.match(rescue, /Do not request a shell session id, poll a shell session later, or return before the companion command exits/i);
-  assert.match(rescue, /if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call/i);
-  assert.match(rescue, /`sandbox_permissions: "require_escalated"`/i);
-  assert.match(rescue, /contact the Claude API for this requested task/i);
-  assert.match(rescue, /do not first try the companion command in the default network-disabled sandbox/i);
   assert.match(rescue, /prefer these steering messages over embedding the raw result text/i);
   assert.match(rescue, /do not embed the raw Claude result inside the notification message/i);
   assert.match(rescue, /do not include any other prose in that notification message/i);
   assert.match(rescue, /for background rescue, use that same steering message as the child's own final assistant message instead of echoing the raw companion result/i);
-  assert.match(rescue, /background built-in rescue now attempts parent wake-up by default/i);
-  assert.match(rescue, /default for background built-in rescue on persistent Codex\/Desktop threads/i);
-  assert.match(rescue, /silently degrade on one-shot `codex exec` runs/i);
   assert.match(rescue, /the parent thread owns prompt shaping/i);
   assert.match(rescue, /If the built-in rescue request is vague, chatty, or a follow-up, the parent may tighten only the task text/i);
   assert.match(rescue, /Prefer passing a small structured `<parent_context>` block instead of forked thread history/i);
@@ -476,8 +405,55 @@ test("review skills never hard-require a question tool the thread may not have",
     );
     assert.match(
       contract,
-      /does not exist in non-interactive threads/i,
-      `${contractPath} must state that the question tool is absent headless`
+      /current mode permits the call/i,
+      `${contractPath} must obey the host's current question-tool mode`
     );
+    assert.match(contract, /proceed with the recommended mode/i);
   }
+});
+
+// These checks target harmful cross-host instructions and reference integrity.
+// The mock-provider E2E suite exercises tool dispatch separately; static text
+// checks cannot prove that a model will choose or execute the intended tools.
+test("all delegation entrypoints link to the shared host contract", () => {
+  for (const contractPath of [
+    "skills/rescue/SKILL.md",
+    "skills/review/SKILL.md",
+    "skills/adversarial-review/SKILL.md",
+    "internal-skills/cli-runtime/runtime.md",
+    "internal-skills/review-runtime/runtime.md",
+  ]) {
+    const contract = read(contractPath);
+    const reference = contract.match(/\[shared host execution contract\]\(([^)]+)\)/)?.[1];
+    assert.ok(reference, `${contractPath} must link its host execution contract`);
+    assert.equal(
+      path.resolve(PROJECT_ROOT, path.dirname(contractPath), reference),
+      path.join(PROJECT_ROOT, "internal-skills/host-runtime/runtime.md"),
+    );
+    assert.doesNotMatch(contract, /require_escalated|fork_context:|reasoning_effort:|send_input\(/);
+    assert.doesNotMatch(contract, /wait for command exit in that same call|do not request a shell session id/i);
+  }
+});
+
+test("host execution contract handles CLI and app capability differences", () => {
+  const host = read("internal-skills/host-runtime/runtime.md");
+  for (const capability of ["fork_turns", "fork_context", "write_stdin", "sandbox_permissions"]) {
+    assert.ok(host.includes(capability), `missing host capability ${capability}`);
+  }
+  assert.match(host, /Never send both fields or invent an unsupported field/);
+  assert.match(host, /Omit `agent_type`, `model`, and `reasoning_effort` by default/);
+  assert.match(host, /If no built-in agent is available or delegation is disabled/);
+  assert.match(host, /Never relaunch the command after a yield/);
+  assert.match(host, /forbidden by policy, omit it/);
+  assert.match(host, /never require a tool named `send_input`/);
+  assert.match(host, /Parent IDs and collaboration-agent addresses belong to different tool APIs/);
+  assert.match(host, /does not change job ownership or mark a deferred result viewed/);
+});
+
+test("setup distinguishes read-only diagnostics from authorized repairs", () => {
+  const setup = read("skills/setup/SKILL.md");
+  assert.match(setup, /setup --check --json/);
+  assert.match(setup, /Normal `setup` is a mutating repair operation/);
+  assert.match(setup, /`--check` cannot be combined with/);
+  assert.match(setup, /CC_PLUGIN_CODEX_AUTH_MODE=subscription/);
 });

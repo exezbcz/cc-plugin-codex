@@ -1,8 +1,12 @@
+<!-- Modified for Codex app and CLI host compatibility. -->
+
 # Claude Code Review Runtime Reference
 
 Use this document only when the main Codex thread or a built-in forwarding child is executing a Claude Code `review` or `adversarial-review` command.
 This is an internal runtime reference, not a public skill. It captures the exact companion-command contract and the foreground/background execution boundary.
 The public skill already resolved the active plugin root from its `SKILL.md` path. Reuse that path here. Do not derive a new runtime path from this document or the current working tree.
+
+Before executing, read the [shared host execution contract](../host-runtime/runtime.md). It defines schema-aware agent routing, waiting on a yielded process, execution permissions, and completion delivery for the Codex app and CLI. If no built-in agent is available, run the companion in the parent in the foreground as described there.
 
 Primary helper:
 - `node "<plugin-root>/scripts/claude-companion.mjs" review ...`
@@ -19,7 +23,6 @@ Foreground contract:
 - Foreground command:
   - `review --view-state on-success ...`
   - `adversarial-review --view-state on-success ...`
-- Run the companion command with `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` Do not first try the companion command in the default network-disabled sandbox.
 - Return companion stdout faithfully and do not add review execution commentary around it.
 
 Background contract:
@@ -36,19 +39,8 @@ Background contract:
   - return stdout only
   - ignore stderr progress chatter such as `[cc] ...`
   - do not inspect the repo or perform the review itself
-  - run the companion command as one blocking foreground shell-tool call, not as a background terminal/session
-  - do not request a shell session id, poll a shell session later, or return before the companion command exits
-  - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
-  - when using `exec_command`, pass `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested review.` on that one call; do not first try the companion command in the default network-disabled sandbox
-  - use at most one `send_input` completion notification on success
-  - mention the tool name `send_input` literally in the child instructions
-  - use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`
-  - do not silently drop the completion notification path when the parent provided a non-empty parent thread id
 
-Spawn-agent defaults:
-- `fork_context: false`
-- `reasoning_effort: "medium"`
-- Omit `agent_type` and `model`. The child then uses the built-in default agent and inherits the parent model. Codex only advertises `agent_type` when custom agents are configured, and it owns the model catalog, so pinning either one breaks across host releases.
+Spawn-agent defaults follow the shared host execution contract.
 
 Completion steering:
 - When a reserved review job id exists, steer to:

@@ -1,3 +1,5 @@
+<!-- Modified to keep prompt shaping in the parent. -->
+
 # Official Guidance Digest
 
 This file summarizes the current Anthropic official guidance that is most relevant to rescue prompt shaping.
@@ -18,6 +20,6 @@ Key takeaways to preserve in rescue prompt shaping:
 - Prefer deterministic scripts or helpers for deterministic operations instead of asking Claude to improvise them.
 
 Implications for this repo:
-- The rescue subagent may tighten the forwarded prompt.
-- The rescue subagent should not inspect the repository just to make the prompt nicer.
-- The rescue subagent should preserve user intent, add only already-known context, and keep the prompt contract compact.
+- The parent may tighten the forwarded prompt before dispatch.
+- The forwarding worker executes the resolved command without another rewriting pass.
+- Preserve user intent, add only already-known context, and keep the prompt contract compact; do not inspect the repository solely to improve wording.
