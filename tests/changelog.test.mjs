@@ -54,6 +54,19 @@ describe("changelog gate", () => {
     }
   });
 
+  it("matches prerelease and Codex build metadata literally", () => {
+    const version = "1.2.3-local.1+codex.fixture";
+    const section = findVersionSection(version, `## v${version}\r\n\r\n- local build\r\n\r\n## v1.2.3\r\n- previous\r\n`);
+    assert.ok(section);
+    assert.match(section.body, /- local build/);
+    assert.doesNotMatch(section.body, /previous/);
+    assert.equal(findVersionSection(version, "## v1.2.3-local.1codex.fixture\n- different version\n"), null);
+  });
+
+  it("does not interpret periods in a version as regex wildcards", () => {
+    assert.equal(findVersionSection("1.2.3", "## v1x2x3\n- unrelated\n"), null);
+  });
+
   it("rejects an empty version section", () => {
     const dir = createTempRepo({
       version: "1.2.3",

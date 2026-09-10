@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.5.1-local.1+codex.20260910180757
+
+- Record provider-backed verification of review, implementation, session resume and restricted review tools through the installed plugin. Refresh the local cache build; agent execution behavior is unchanged.
+- Match changelog version headings literally so Codex build metadata and prerelease identifiers validate correctly.
+
 ## v1.5.1-local.1
 
 - Adapt delegation skills to Codex app and CLI tool capabilities, including continuation of an already-running shell command.

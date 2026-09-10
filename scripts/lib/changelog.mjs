@@ -23,8 +23,9 @@ export function readChangelog(repoRoot = process.cwd()) {
 
 export function findVersionSection(version, changelogText) {
   const normalized = String(changelogText ?? "");
-  const headingPattern = new RegExp(`^##\\s+v?${version.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\s*$`, "m");
-  const headingMatch = headingPattern.exec(normalized);
+  // Match the version literally; local Codex build metadata contains "+".
+  const headingMatch = [...normalized.matchAll(/^##[ \t]+([^\r\n]+?)[ \t]*\r?$/gm)]
+    .find((match) => match[1] === "v" + version || match[1] === String(version));
   if (!headingMatch) {
     return null;
   }
